@@ -1,0 +1,16 @@
+{
+  "name": "ugn-video",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @ugn/contracts && npm run build -w @ugn/backend -w @ugn/worker -w @ugn/frontend",
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

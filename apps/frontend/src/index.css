@@ -1,0 +1,23 @@
+@import 'tailwindcss';
+
+/* UGN theme: primary red, near-black palette, Bebas Neue headings, Montserrat body. */
+@theme {
+  --color-primary: #dc2626;
+  --color-primary-hover: #b91c1c;
+  --color-ink-950: #0a0a0a;
+  --color-ink-900: #111111;
+  --color-ink-800: #1a1a1a;
+  --color-ink-700: #262626;
+  --color-ink-500: #737373;
+  --color-ink-300: #d4d4d4;
+  --font-display: 'Bebas Neue', sans-serif;
+  --font-sans: 'Montserrat', system-ui, sans-serif;
+}
+
+body {
+  @apply bg-ink-950 text-ink-300 font-sans antialiased;
+}
+
+h1, h2, h3 {
+  @apply font-display tracking-wide text-white;
+}

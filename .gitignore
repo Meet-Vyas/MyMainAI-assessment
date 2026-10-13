@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+coverage/
+# never commit media
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.ts.seg
+
+# confidential assessment brief, keep out of the public repo
+*.pdf

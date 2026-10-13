@@ -1,0 +1,113 @@
+name: ugn-video
+
+x-s3-env: &s3-env
+  S3_ENDPOINT: http://minio:9000
+  S3_PUBLIC_ENDPOINT: http://localhost:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: ugn-videos
+  S3_ACCESS_KEY_ID: minioadmin
+  S3_SECRET_ACCESS_KEY: minioadmin
+  S3_FORCE_PATH_STYLE: "true"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ugn
+      POSTGRES_PASSWORD: ugn
+      POSTGRES_DB: ugn
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ugn -d ugn"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # BullMQ needs keys to never be evicted, and AOF so queued jobs survive a Redis restart.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    # MinIO no longer publishes images to Docker Hub (and quay.io now requires a login), so we use
+    # Bitnami's frozen archive build. Pinned, so every reviewer runs exactly what we tested.
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_CONSOLE_PORT_NUMBER: "9001"
+      # Local stand-in for the S3 AbortIncompleteMultipartUpload lifecycle rule.
+      MINIO_API_STALE_UPLOADS_EXPIRY: 48h
+      MINIO_API_STALE_UPLOADS_CLEANUP_INTERVAL: 1h
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/bitnami/minio/data]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio-init:
+    image: bitnamilegacy/minio-client:2025.7.21-debian-12-r3
+    environment:
+      # The image's home dir is read-only for its non-root user, so keep mc config in /tmp.
+      MC_CONFIG_DIR: /tmp/.mc
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/init/minio-init.sh"]
+    volumes: ["./minio-init.sh:/init/minio-init.sh:ro"]
+
+  backend:
+    build: { context: .., dockerfile: infra/Dockerfile, target: backend }
+    environment:
+      <<: *s3-env
+      PORT: 3000
+      CORS_ORIGINS: http://localhost:5173
+      DATABASE_URL: postgresql://ugn:ugn@postgres:5432/ugn
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-0123456789}
+      ADMIN_EMAIL: admin@ugn.local
+      ADMIN_PASSWORD: admin12345
+    ports: ["3000:3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+
+  worker:
+    build: { context: .., dockerfile: infra/Dockerfile, target: worker }
+    environment:
+      <<: *s3-env
+      DATABASE_URL: postgresql://ugn:ugn@postgres:5432/ugn
+      REDIS_URL: redis://redis:6379
+      WORKER_CONCURRENCY: 1
+    # Bound resources so one 10-hour transcode cannot starve the host.
+    deploy:
+      resources:
+        limits: { cpus: "4", memory: 4g }
+    volumes: [workertmp:/tmp/ugn]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+
+  frontend:
+    build: { context: .., dockerfile: infra/Dockerfile, target: frontend }
+    environment:
+      API_PROXY_TARGET: http://backend:3000
+    ports: ["5173:5173"]
+    depends_on: [backend]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  workertmp:

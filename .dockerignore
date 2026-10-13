@@ -1,0 +1,8 @@
+**/node_modules
+**/dist
+**/.env
+.git
+*.mp4
+*.mov
+*.mkv
+*.pdf
