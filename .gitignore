@@ -13,3 +13,6 @@ coverage/
 
 # confidential assessment brief, keep out of the public repo
 *.pdf
+
+# generated test videos (see CLAUDE.md for the ffmpeg command)
+test-media/

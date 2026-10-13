@@ -14,10 +14,14 @@
   --font-sans: 'Montserrat', system-ui, sans-serif;
 }
 
-body {
-  @apply bg-ink-950 text-ink-300 font-sans antialiased;
-}
+/* In @layer base so utility classes (e.g. font-sans on a small h3) can override these defaults;
+   unlayered CSS would beat every Tailwind utility. */
+@layer base {
+  body {
+    @apply bg-ink-950 text-ink-300 font-sans antialiased;
+  }
 
-h1, h2, h3 {
-  @apply font-display tracking-wide text-white;
+  h1, h2, h3 {
+    @apply font-display tracking-wide text-white;
+  }
 }

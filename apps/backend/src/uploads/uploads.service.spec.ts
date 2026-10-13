@@ -3,6 +3,7 @@ import { NoSuchUpload } from '@aws-sdk/client-s3';
 import { MiB } from '@ugn/contracts';
 import type { Video } from '@ugn/db';
 import type { AppConfig } from '../config/config';
+import type { VideoEventsService } from '../events/video-events.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { VideoQueueService } from '../queue/video-queue.service';
 import type { StorageService, UploadedPart } from '../storage/storage.service';
@@ -75,15 +76,17 @@ function setup(row: Video | null = uploadingVideo()) {
   };
   const queue = { enqueueProcessing: jest.fn(async () => undefined) };
   const videos = { delete: jest.fn(async () => void (video = null)) };
+  const events = { publish: jest.fn(async () => undefined) };
   const config = { UPLOAD_URL_TTL_SECONDS: 3600 } as AppConfig;
   const service = new UploadsService(
     prisma as unknown as PrismaService,
     storage as unknown as StorageService,
     queue as unknown as VideoQueueService,
     videos as unknown as VideosService,
+    events as unknown as VideoEventsService,
     config,
   );
-  return { service, prisma, storage, queue, videos, current: () => video };
+  return { service, prisma, storage, queue, videos, events, current: () => video };
 }
 
 describe('UploadsService.init', () => {
@@ -142,9 +145,10 @@ describe('UploadsService.status', () => {
 });
 
 describe('UploadsService.complete', () => {
-  it('completes, marks UPLOADED and enqueues processing for run 0', async () => {
-    const { service, storage, queue, current } = setup();
+  it('completes, marks UPLOADED, enqueues processing for run 0 and notifies listeners', async () => {
+    const { service, storage, queue, events, current } = setup();
     const dto = await service.complete(ID);
+    expect(events.publish).toHaveBeenCalledWith({ kind: 'changed', videoId: ID, status: 'UPLOADED' });
     expect(storage.completeMultipartUpload).toHaveBeenCalledWith(`uploads/${ID}/source`, 'mpu-1', allParts);
     expect(dto.status).toBe('UPLOADED');
     expect(current()).toMatchObject({ status: 'UPLOADED', uploadId: null });

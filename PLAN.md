@@ -32,7 +32,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - [x] 1. **Scaffold.** Set up the npm workspaces, contracts package and tsconfig base. Docker Compose with postgres, redis, minio plus a bucket and CORS init job, backend, worker and frontend. Write `.env.example` files. Make `docker compose up` boot. *(about 2h)*
 - [x] 2. **Backend core.** Prisma `Video` model with status, `uploadId`, keys, duration, renditions, error and attempts, plus a seed admin. jose JWT cookie auth with a guard. Videos CRUD. *(about 1.5h)*
 - [x] 3. **Multipart upload API.** Endpoints for init, sign parts (batch), list parts, complete and abort, with zod validation. Enqueue the job on complete. Add the sweeper. Add tests. *(about 2h)*
-- [ ] 4. **Admin upload UI.** Login screen. Uploader with chunking, concurrency, pause/resume/cancel, speed and ETA, and resume after refresh. Video list with live status through SSE, plus retry and delete. Apply the UGN theme. *(about 2.5h)*
+- [x] 4. **Admin upload UI.** Login screen. Uploader with chunking, concurrency, pause/resume/cancel, speed and ETA, and resume after refresh. Video list with live status through SSE, plus retry and delete. Apply the UGN theme. *(about 2.5h)*
 - [ ] 5. **Worker.** Probe, poster, HLS ladder, upload, progress, retries, idempotency and reconciler. Tests for the state machine. *(about 2.5h)*
 - [ ] 6. **Public playback.** List of READY videos. Player page with detection logic, quality menu, accessible controls, resume watching and the graceful states. `GET /videos/:id/playback`. *(about 2h)*
 - [ ] 7. **Verification.** Generate 10h and ~10GB test files. Test kill/resume for uploads, kill the worker mid-job, and test on devices. Fill in the test matrix. *(about 1.5h)*
@@ -58,6 +58,31 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - **Custom thumbnail:** a presigned POST (not PUT) so storage itself enforces 5 MiB max and the exact content type. It's stored at `public/videos/{id}/custom-thumbnail` and recorded on complete. It's publicly readable as soon as it's uploaded (admin-only upload, so accepted).
 - **Size limit:** 50 GiB (a 10-hour set at 8 Mbit/s is about 36 GB). The pre-upload type check is extension plus declared MIME; browsers often send `''` for `.mkv`. The real check is ffprobe in the worker.
 - **Cancel** is `DELETE /admin/videos/:id`, which aborts the S3 upload and removes the objects. No separate abort endpoint.
+- **Upload engine** (`apps/frontend/src/upload/UploadEngine.ts`): plain TypeScript, with the network injected, so it's unit-tested without a browser.
+  - Every start or resume asks the server what's stored, so pause, page reload and a fresh start are one code path.
+  - 4 parts in flight: saturates a home uplink while capping what a pause or drop throws away at 64 MiB.
+  - Network errors retry forever with capped (30s), jittered backoff and a "reconnecting" state; server errors give up after 6 attempts; a 403 re-signs.
+  - Links are signed 100 at a time, refreshed 5 min before expiry.
+  - Stall detection: a part with no progress for 45s is aborted, because a dropped Wi-Fi link often hangs instead of erroring.
+  - `File.slice()` is lazy, so a 10 GB file is never read into memory.
+  - XHR, not fetch, because only XHR reports upload progress.
+- **Resume after refresh:** browsers can't reopen a file by themselves, so the admin re-selects it. localStorage keeps `{videoId, name, size, lastModified, sampleHash}`, where sampleHash is SHA-256 of the first and last MiB plus the size. A different file with the same name and size is refused. WebCrypto needs a secure context, so on a plain-HTTP LAN IP the check falls back to name and size. Picking a matching file in the upload form also offers "Resume instead".
+- **Live status:** SSE (`GET /api/admin/videos/events`) fed by Redis pub/sub (`video-events`), so the worker and all backend instances share it.
+  - Events are small (`changed` with optional status/progress, or `deleted`); progress-only events patch in place, anything else refetches that video.
+  - The client refetches the whole list on every (re)connect, so missed events don't matter, and it polls every 10s while SSE is down.
+  - A 25s heartbeat keeps proxies from cutting idle streams.
+  - SSE over WebSockets: one-way is enough, it's plain HTTP (cookie and proxy just work), and EventSource reconnects by itself.
+- **Retry:** `POST /admin/videos/:id/retry` does a conditional FAILED→UPLOADED, increments `attempts` and enqueues run n+1, so a double-click can't queue two runs.
+- **UI notes:** destructive actions use an inline two-step confirm (no `window.confirm`). Status changes are announced through an `aria-live` region. Framer Motion respects reduced motion. The left column isn't sticky, since a sticky element taller than the screen hides its bottom.
+- **Vitest 5** (not 3) because Vitest 3 has critical advisories; it supports our Vite 6.4.
+- **To do in milestone 6:** split the bundle (currently >500 KB) so public viewers don't download the admin uploader.
+- **Browser-verified (Chrome, desktop):**
+  - Login error and success.
+  - Client rejects a renamed `.exe`.
+  - 1 GiB upload: pause, page reload, impostor file refused, real file resumed from 31.3% to done, SHA-256 of the stored object matches.
+  - Cancel removed the upload and left no unfinished S3 upload.
+  - FAILED shown live with its reason; Retry → Queued.
+  - Not yet verified: a dropped network in the browser (covered by engine unit tests), and mobile/narrow layouts (milestone 7).
 - **To revisit in milestone 5:** let DELETE cancel a PROCESSING job instead of returning 409. The worker must also treat a job whose video no longer exists (deleted after enqueue) as a no-op, not a failure.
 
 ## Critical files (to be created)

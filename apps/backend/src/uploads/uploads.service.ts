@@ -28,6 +28,7 @@ import {
 } from '@ugn/contracts';
 import type { Video } from '@ugn/db';
 import { APP_CONFIG, type AppConfig } from '../config/config';
+import { VideoEventsService } from '../events/video-events.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { VideoQueueService } from '../queue/video-queue.service';
 import { StorageService, type UploadedPart } from '../storage/storage.service';
@@ -52,6 +53,7 @@ export class UploadsService {
     private readonly storage: StorageService,
     private readonly queue: VideoQueueService,
     private readonly videos: VideosService,
+    private readonly events: VideoEventsService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -83,6 +85,7 @@ export class UploadsService {
       await this.storage.abortMultipartUpload(sourceKey, uploadId).catch(() => undefined);
       throw err;
     }
+    await this.events.publish({ kind: 'changed', videoId: id, status: video.status });
     return { video: this.toDto(video), partSize, partCount: partCount(req.fileSize, partSize) };
   }
 
@@ -182,6 +185,7 @@ export class UploadsService {
     if (fresh.status === 'UPLOADED') {
       await this.queue.enqueueProcessing(fresh.id, fresh.sourceKey, fresh.attempts);
     }
+    await this.events.publish({ kind: 'changed', videoId: fresh.id, status: fresh.status });
     return this.toDto(fresh);
   }
 
