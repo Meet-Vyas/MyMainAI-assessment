@@ -6,16 +6,21 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "dev": "tsc -p tsconfig.build.json --watch",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1151.0",
+    "@aws-sdk/s3-request-presigner": "^3.1151.0",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@ugn/contracts": "*",
-    "bullmq": "^5.34.0",
-    "ioredis": "^5.4.2",
+    "@ugn/db": "*",
+    "bullmq": "^5.81.5",
+    "ioredis": "^5.11.1",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

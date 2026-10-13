@@ -17,15 +17,15 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
   - **Cleanup:** cancel calls AbortMultipartUpload. A BullMQ repeatable sweeper aborts uploads with no activity for 24h. An S3 lifecycle rule (`AbortIncompleteMultipartUpload` after 2 days) is the backstop.
 - **Processing:** a BullMQ `process-video` job with a long `lockDuration` that is renewed automatically, `maxStalledCount` set, 3 attempts with exponential backoff, and worker concurrency of 1 per container.
   - **Pipeline:** download the source to a temp directory, ffprobe it (reject non-video files), poster, HLS ladder, upload outputs, mark READY.
-  - **Idempotency:** output goes to `videos/{id}/hls/v{attempt}/`, and the DB pointer is flipped atomically at the end. Old prefixes are cleaned up.
-  - **Resource bounds:** docker cpu/mem limits, `ffmpeg -threads`, a disk check before starting, and temp directories always removed.
+  - **Idempotency:** each run's output goes to `public/videos/{id}/hls/{uuid}/`, and the DB pointer is flipped atomically at the end. Old prefixes are cleaned up. *(Built in M5: a random id per run rather than `v{attempt}`, because a stalled re-run keeps the same attempt number.)*
+  - **Resource bounds:** docker cpu/mem limits, `ffmpeg -threads`, ffmpeg run at `nice 10`, a disk check before starting, and temp directories always removed (plus wiped on start).
   - **Progress:** parsed from ffmpeg `-progress`, sent via `job.updateProgress`, and written through to the DB (throttled).
-  - **Zombie recovery:** stalled jobs get re-queued, plus a reconciler that resets PROCESSING rows with no live job.
-- **HLS:** H.264 High profile with AAC-LC, fMP4 or TS segments of 6s with keyframes aligned (`-g` = 2× fps, no scene-cut), and VOD playlists. The ladder is 1080p/720p/480p (360p optional). One encode pass produces all renditions with `-var_stream_map` and a master playlist. This gives fast start and quick seeks.
+  - **Zombie recovery:** stalled jobs get re-queued, plus a reconciler that re-queues or fails UPLOADED/PROCESSING rows whose job is missing, failed or back in the queue. SIGTERM re-queues the running job without using an attempt.
+- **HLS:** H.264 High profile (`yuv420p`) with AAC-LC, **MPEG-TS** segments of 6s with keyframes forced every 2 s (time-based, so variable-frame-rate phone video aligns too; no scene-cut), and VOD playlists. The ladder is the top 3 of 1080p/720p/480p/360p **at or below the source** (never upscaled), using capped CRF. One encode pass produces all renditions with `-var_stream_map` and a master playlist. This gives fast start and quick seeks. *(Settled in M5; see the decisions log.)*
 - **Playback:** if `video.canPlayType('application/vnd.apple.mpegurl')`, use native playback (Safari, iOS, most webviews). Otherwise, if `Hls.isSupported()`, use hls.js. Otherwise, show the unsupported state.
   - Use `playsinline` and `muted`-free autoplay avoidance, plus a custom accessible control bar and a quality selector.
   - Resume position is saved per video in localStorage.
-- **Storage headers:** CORS on the bucket. `.m3u8` gets `application/vnd.apple.mpegurl` with `max-age=10`. Segments get `max-age=31536000, immutable`.
+- **Storage headers:** CORS on the bucket. `.m3u8` gets `application/vnd.apple.mpegurl` with `max-age=60` (raised from the planned 10 s, since versioned prefixes mean playlists never change in place). Segments and posters get `max-age=31536000, immutable`. Set per object by the worker at upload.
 - **Live status:** SSE endpoint `GET /admin/videos/events`, fed by the worker over Redis pub/sub. Polling is the fallback.
 
 ## Milestones
@@ -33,7 +33,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - [x] 2. **Backend core.** Prisma `Video` model with status, `uploadId`, keys, duration, renditions, error and attempts, plus a seed admin. jose JWT cookie auth with a guard. Videos CRUD. *(about 1.5h)*
 - [x] 3. **Multipart upload API.** Endpoints for init, sign parts (batch), list parts, complete and abort, with zod validation. Enqueue the job on complete. Add the sweeper. Add tests. *(about 2h)*
 - [x] 4. **Admin upload UI.** Login screen. Uploader with chunking, concurrency, pause/resume/cancel, speed and ETA, and resume after refresh. Video list with live status through SSE, plus retry and delete. Apply the UGN theme. *(about 2.5h)*
-- [ ] 5. **Worker.** Probe, poster, HLS ladder, upload, progress, retries, idempotency and reconciler. Tests for the state machine. *(about 2.5h)*
+- [x] 5. **Worker.** Probe, poster, HLS ladder, upload, progress, retries, idempotency and reconciler. Tests for the state machine. *(about 2.5h)*
 - [ ] 6. **Public playback.** List of READY videos. Player page with detection logic, quality menu, accessible controls, resume watching and the graceful states. `GET /videos/:id/playback`. *(about 2h)*
 - [ ] 7. **Verification.** Generate 10h and ~10GB test files. Test kill/resume for uploads, kill the worker mid-job, and test on devices. Fill in the test matrix. *(about 1.5h)*
 - [ ] 8. **Docs.** README (including AI usage and assumptions), ARCHITECTURE (with a mermaid diagram) and ANSWERS W1–W7. Demo video if time allows. *(about 2h)*
@@ -83,7 +83,103 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
   - Cancel removed the upload and left no unfinished S3 upload.
   - FAILED shown live with its reason; Retry → Queued.
   - Not yet verified: a dropped network in the browser (covered by engine unit tests), and mobile/narrow layouts (milestone 7).
-- **To revisit in milestone 5:** let DELETE cancel a PROCESSING job instead of returning 409. The worker must also treat a job whose video no longer exists (deleted after enqueue) as a no-op, not a failure.
+- ~~To revisit in milestone 5: let DELETE cancel a PROCESSING job; worker no-ops on a deleted video.~~ Done, see below.
+
+### Milestone 5: worker
+- **Pipeline** (`apps/worker/src/processing/video-job.runner.ts`): claim → ffprobe → disk check → download → poster → one-pass HLS encode → upload → publish.
+  - The runner is plain TypeScript with ffmpeg, S3 and the DB injected, so the state machine is unit-tested without them.
+  - The BullMQ glue (`video.processor.ts`) only translates its result.
+- **Probe before download:** ffprobe reads the source over a presigned URL with range requests, so a renamed 10 GB non-video is rejected without downloading it.
+  - Known "not media" ffprobe errors throw `InvalidMediaError`, which becomes BullMQ's `UnrecoverableError`: FAILED at once, no retries.
+  - Other ffprobe errors (e.g. storage unreachable) are retried.
+  - Also rejected: no video stream (audio files, including cover art), images, and no duration or frame size.
+- **Ladder** (`media/ladder.ts`): 1080p/720p/480p/360p with caps of 5000/3000/1500/800 kbit/s, taking the top 3 at or below the source.
+  - **Never upscales.** A 720p source gets 720/480/360. Upscaling costs encode time, storage and egress for no visible gain. Assumption: the spec's "1080/720/480" describes a 1080p-or-better source.
+  - Portrait is handled by fitting each rung's box in the source's orientation; rotation metadata and non-square pixels are applied first. Verified on an iPhone portrait `.mov`: 1080x1920 → 1080x1920/720x1280/480x854.
+  - Anything smaller than 360p gets one variant at its own size.
+- **Encode:** one ffmpeg process decodes once, `split`s, and runs 3 libx264 encoders into one HLS muxer (`-var_stream_map`, master playlist).
+  - H.264 High, `yuv420p` (10-bit/4:2:2 camera files would otherwise fail on phones).
+  - Capped CRF 21 with per-variant `maxrate` and 2x `bufsize`: quality-targeted, with peaks bounded for ABR. ffmpeg writes BANDWIDTH and CODECS into the master.
+  - Keyframes forced every 2 s with `sc_threshold 0`, so 6 s segments align across variants.
+  - AAC-LC 128k stereo 48 kHz.
+  - MPEG-TS segments over fMP4, for the widest player support. fMP4 only pays off with HEVC/AV1 or DASH.
+  - Preset `veryfast` (env `FFMPEG_PRESET`). A 14-minute 1080p portrait video encodes in about 10 min on 4 CPUs (~1.4x realtime).
+- **Output and idempotency:** each run writes to `public/videos/{id}/hls/{random uuid}/` (master, variant folders, `poster.jpg`). One conditional UPDATE then sets READY and the new `hlsPrefix`.
+  - Players never see a half-written or mixed set, and nothing is overwritten under a URL a CDN might have cached.
+  - On success, sibling prefixes (crashed runs) are deleted. On any failure, the run deletes its own prefix.
+  - Upload order is segments, then variant playlists, then master.
+- **Ownership rule:** every worker write is `updateMany where {id, attempts: run, status in [...]}`, with the run number now in the job payload.
+  - A job for a deleted video, a job superseded by an admin retry, or a duplicate delivery of a READY video just completes as "skipped".
+  - Two copies of the same job racing (lock lost) can't both publish. The loser's heartbeat fails, it stops and cleans up.
+- **Progress:** download is 0–5%, encode 5–90% (ffmpeg `-progress out_time_us`), upload 90–99%.
+  - Written when the percentage changes, at most every 2 s, and at least every 10 s as a heartbeat. Mirrored to `job.updateProgress` and to SSE.
+  - The heartbeat doubles as the **cancellation check**: once the row is gone or retried, the write matches nothing, ffmpeg is killed and the run cleans up within ~10 s.
+- **Delete while processing** is now allowed. The backend deletes storage, then the row, then sweeps `public/videos/{id}/` again.
+  - The second sweep closes the race where the worker uploads its last files after the first sweep and finishes just before the row goes.
+  - Every worker upload happens before its final row update, so the second sweep sees them all.
+- **Failure handling:**
+  - Transient error with attempts left: back to UPLOADED with `failureReason` "Retrying after: …" (so the UI shows Queued, not Failed), and BullMQ retries with 30 s/60 s backoff.
+  - Last attempt, or invalid media: FAILED with the reason.
+  - Job options (3 attempts, backoff, retention) moved to `PROCESS_JOB_OPTIONS` in contracts, shared by the backend and the reconciler.
+- **Crash recovery (BullMQ):** lock 120 s, renewed every 60 s; stalled check every 60 s; `maxStalledCount: 2`.
+  - A dead worker's job is re-queued within ~3 min and doesn't use up one of the 3 attempts.
+  - A job that crashes its worker 3 times fails ("stalled more than allowable limit"). The `failed` handler and the reconciler make sure the row says FAILED.
+  - We started at a 60 s lock. In testing, a full-CPU encode starved Node for 54 s, the lock lapsed, and the job ran twice (harmless thanks to the ownership rule, but wasted CPU). Fix: ffmpeg runs under `nice -n 10`, and the lock is longer as margin.
+- **Clean shutdown:** SIGTERM aborts the run (kills ffmpeg, deletes its partial output), sets the row back to UPLOADED, then `job.moveToWait` plus `WaitingError`. The job is re-queued at once without using an attempt.
+  - Compose: `init: true` (tini) on all app containers. Node as PID 1 ignored the SIGTERM NestJS re-sends itself after its shutdown hooks, so every stop hung for the full grace period.
+  - The worker also closes the Redis connections it hands to BullMQ, which doesn't close them itself.
+  - `stop_grace_period: 30s`.
+- **Hung ffmpeg:** killed after 60 s with no `-progress` output. Otherwise lock renewal would keep a dead encode "active" forever.
+- **Reconciler** (`reconciler.service.ts`, BullMQ job scheduler every 5 min, so one instance runs it): looks at UPLOADED/PROCESSING rows not updated for 5 min (live jobs heartbeat every 10 s).
+  - Job missing → re-enqueue. Job back in the queue while the row says PROCESSING → mark the row UPLOADED.
+  - Job failed, or completed without moving the video on → mark FAILED with the reason.
+  - Each write also requires the row to still be stale, so it can't overwrite a worker that just picked the video up.
+- **Resource bounds:**
+  - Compose limits of 4 CPUs and 4 GB. `FFMPEG_THREADS=4` per encoder. Measured about 650 MiB RSS for a 1080p portrait ladder.
+  - Free scratch disk must cover source + estimated output (sum of caps × duration × 1.1) + 1 GiB, or the run fails as retryable.
+  - Scratch is an anonymous volume per container (`/tmp/ugn`), wiped on start; a hard crash never reaches the `finally` cleanup. The old named `workertmp` volume is no longer used.
+- **S3 from the worker:** one client (no browser-facing presigning), `maxAttempts: 5`, socket idle timeout 120 s.
+  - Output files are uploaded as buffers (each ≤ a few MB), because the SDK can't retry a stream body.
+  - Headers are set per object: `.m3u8` → `application/vnd.apple.mpegurl`, `max-age=60`; `.ts`/`.jpg` → `max-age=31536000, immutable`.
+  - Playlists get 60 s rather than the planned 10 s: prefixes are versioned, so a playlist never changes in place; the TTL only bounds how long a deleted video stays on CDN edges.
+- **Poster:** frame at min(10%, 30 s), at most 1280 px wide, input-seeked. A custom thumbnail, if uploaded, wins as `posterKey`.
+- **Known limitations (for W2/W7):**
+  - A crash restarts the encode from 0. The 10 h answer is to upload segments as they're produced and resume from the last full segment, or to transcode chunks in parallel.
+  - The source is downloaded again on each retry.
+  - HDR sources are converted to 8-bit without tone-mapping (colours can look washed out).
+  - High frame rates aren't capped.
+  - `docker kill` doesn't trigger `restart: unless-stopped` (Docker treats it as a manual stop); real crashes do.
+- **Verified on the running stack:**
+  - e2e (`processing.e2e-spec.ts`): a 14 s clip → READY, 3 renditions with correct content types, cache headers and CORS; delete removes everything.
+  - The upload e2e's random bytes named `.mp4` → FAILED "Not a readable video file" with no retries.
+  - Manual tests with a 14-minute iPhone portrait `.mov` (1.6 GB), recorded in the next bullet.
+- **Manual crash tests** (1.6 GB iPhone `.mov`), all against the running stack:
+  - **Hard crash:** SIGKILL at 25%, then restart → re-picked after 77 s (60 s lock at the time), leftover scratch wiped, READY, one output prefix, 1080x1920 poster.
+  - **Clean stop:** SIGTERM at 10% → before the tini fix the stop took 30 s; after it, 1 s (exit 143). Row UPLOADED, job waiting, 0 attempts used, no output left in storage. The restarted worker re-picked it at once and it went READY in 9.5 min.
+    - That run had no lock-renewal errors, no stalls, and a largest gap between progress events of 12 s (54 s before niceing ffmpeg).
+  - **Delete mid-encode** (at 15%): API 204, worker stopped 3 s later ("skipped"), no row, no objects under `uploads/` or `public/`, scratch empty.
+  - **Reconciler:** removed the queued job from Redis and backdated the row → the next reconcile pass logged "UPLOADED but job … is unknown: enqueue", re-added `run0` with the right payload, and the video went READY.
+- **Measured** (1080p portrait iPhone `.mov`, 14 min, 1.6 GB source, 4 CPUs, `veryfast`):
+  - About 9.5 min encode (~1.5x realtime). Worker RSS about 650 MiB. The CPU limit is pinned throughout, and the cgroup is constantly throttled.
+  - Output 920 MiB across 428 objects (3 variants × 141 segments, plus playlists and poster): about 9.2 Mbit/s summed across variants, close to the caps on handheld phone footage.
+  - Extrapolated to a 10 h video: roughly 7 h of encode on 4 CPUs, and up to about 40 GB of output at the caps. Needed for W2 and W3.
+- **Tests added:**
+  - Worker unit tests (48):
+    - `media/ladder.spec.ts`: ladder per source shape, never upscaling, the disk estimate.
+    - `media/probe.spec.ts`: rotation, SAR, and rejecting audio files, cover art, images, and files with no duration or frame size.
+    - `media/ffmpeg.spec.ts`: ffmpeg arguments with and without audio, progress parsing, poster time.
+    - `processing/output-headers.spec.ts`: MIME types and Cache-Control.
+    - `processing/progress-reporter.spec.ts`: throttle, heartbeat, never going backwards, detecting a lost video.
+    - `processing/video-job.runner.spec.ts`: the state machine. Success; leftover cleanup; custom poster; recovery from a stalled job; skips for deleted, superseded and already-READY videos; invalid media; transient errors before and on the last attempt; the disk check; delete mid-encode; retry during upload; shutdown.
+    - `reconciler.spec.ts`: the decision table.
+  - Backend: the delete-while-processing order (`videos.service.spec.ts`).
+  - e2e: `processing.e2e-spec.ts`, plus the run number and worker rejection checks added to `uploads.e2e-spec.ts`.
+- **Notes for milestone 6:**
+  - The playback API needs `hlsPrefix` (master = `hlsPrefix + HLS_MASTER_PLAYLIST`), `renditions` (`Rendition[]` in contracts), `durationSec`, `width`/`height` and `posterKey`. All are on the row; `VideoDto` doesn't expose the HLS fields yet.
+  - The master URL is `PUBLIC_MEDIA_BASE_URL + hlsPrefix + 'master.m3u8'`.
+  - Portrait videos exist (1080x1920), so the player must not assume 16:9.
+- **Compose gotcha:** recreating a container keeps a volume previously mounted at the same path, so switching `workertmp` to an anonymous volume needed `docker compose up -d --force-recreate --renew-anon-volumes worker` before the old volume could be removed (done).
+- **Not verified yet:** a real OOM kill, Redis restart mid-job, `--scale worker=2` (should work: separate scratch volumes, BullMQ locks, ownership rule), and a full 10 h file (milestone 7).
 
 ## Critical files (to be created)
 - `package.json` (workspaces)
@@ -91,7 +187,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - `packages/contracts/src/*`
 - `apps/backend/prisma/schema.prisma`
 - `apps/backend/src/{auth,uploads,videos,playback,events}/`
-- `apps/worker/src/{processor,ffmpeg,reconciler}/`
+- `apps/worker/src/{video.processor.ts,reconciler.service.ts,processing/,media/}`
 - `apps/frontend/src/{pages,components/Uploader,components/Player}/`
 - `PLAN.md`, `README.md`, `ARCHITECTURE.md`, `ANSWERS.md`
 

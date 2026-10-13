@@ -28,6 +28,16 @@ export function canTransition(from: VideoStatus, to: VideoStatus): boolean {
   return TRANSITIONS[from].includes(to);
 }
 
+/** One HLS variant, as stored in Video.renditions. */
+export interface Rendition {
+  /** e.g. "720p"; also the variant's directory name inside the output prefix. */
+  name: string;
+  width: number;
+  height: number;
+  /** Peak video + audio bits per second, as advertised in the master playlist. */
+  bandwidth: number;
+}
+
 /** Shape the API returns for a video. Dates are ISO strings, sizes are bytes. */
 export interface VideoDto {
   id: string;

@@ -18,6 +18,7 @@ Take-home assessment for Underground Nights (Full-Stack TypeScript role): **larg
 | `apps/worker` | NestJS, BullMQ, Redis 7 (ioredis), ffmpeg/ffprobe | Probe, transcode, thumbnails |
 | `apps/frontend` | React 19, TypeScript, Vite | Admin upload UI + public video page |
 | `packages/contracts` | Shared TS types | DTOs, job payloads, enums, zod schemas shared by all apps |
+| `packages/db` | Prisma 6 | Schema, migrations and client, shared by backend and worker (our addition) |
 | `infra` | Docker Compose | Postgres, Redis, MinIO, all apps; `docker compose up` runs everything |
 
 **Frontend:** Tailwind (primary `#DC2626`, near-black dark palette, Bebas Neue headings, Montserrat body), Framer Motion, lucide-react, react-hot-toast, react-hook-form + zod, hls.js.
@@ -86,3 +87,51 @@ Add `-b:v 2500k` or a higher resolution to reach ~10 GB.
 - Keep types end-to-end through `packages/contracts`; don't redefine DTOs per app.
 - When something is ambiguous, make a reasonable assumption and record it in the README.
 - The author must be able to explain every line live, so prefer clear code over clever code.
+
+## How to work here
+
+**Start every session by reading `PLAN.md`.** It has the milestone checklist and a **decisions log** with the reasoning behind each choice and open notes for later milestones. After finishing a milestone, tick it and add its decisions to the log; the README and ARCHITECTURE docs are written from it.
+
+**Working agreements with the author**
+- **Never commit unless explicitly asked.** The author reviews each milestone first. Commits are one per milestone, with a descriptive message (they're graded).
+- Do one milestone at a time. Don't start the next until asked.
+- Ask (AskUserQuestion) when blocked on a real decision; otherwise decide and log it in `PLAN.md`.
+- Verify against the running stack, not only unit tests. Report plainly what was and wasn't verified.
+
+**Commands** (from the repo root)
+
+| What | Command |
+|---|---|
+| Run everything | `docker compose up -d --build` (rebuild one service: `docker compose up -d --build backend`) |
+| Unit tests | `npm test`: Jest for contracts and backend, Vitest for frontend |
+| E2E tests (stack must be up) | `npm run test:e2e -w @ugn/backend` |
+| Typecheck / build | `npm run typecheck` / `npm run build` |
+| New migration | edit `packages/db/prisma/schema.prisma`, then in `packages/db`: `DATABASE_URL=postgresql://ugn:ugn@localhost:5432/ugn npx prisma migrate dev --name <name>`. The backend container applies migrations and re-seeds the admin on start. |
+
+After changing `packages/contracts`, run `npm run build -w @ugn/contracts` before typechecking the apps; they import its `dist/`.
+
+**Local URLs and dev credentials** (dev-only defaults from Compose)
+- App: http://localhost:5173 (`/admin`, `/login`). API: http://localhost:3000/api (also proxied at `:5173/api`).
+- Admin: `admin@ugn.local` / `admin12345`. MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`).
+- Postgres `localhost:5432` (ugn/ugn/ugn), Redis `localhost:6379`.
+- Inspect storage: `docker compose exec -T minio mc --config-dir /tmp/.mc alias set local http://localhost:9000 minioadmin minioadmin`, then `... mc --config-dir /tmp/.mc ls -r [--incomplete] local/ugn-videos`.
+
+**Where things are**
+- Backend modules: `apps/backend/src/{auth,videos,uploads,storage,queue,events,config,prisma}`. E2E tests are in `apps/backend/test/`.
+- Upload engine (core client logic, unit-tested): `apps/frontend/src/upload/UploadEngine.ts`.
+- Worker: `apps/worker/src/processing/video-job.runner.ts` (pipeline + state machine, unit-tested with fakes), `video.processor.ts` (BullMQ glue, shutdown), `reconciler.service.ts`, `media/` (ffprobe, ladder, ffmpeg args).
+- Shared rules (state machine, part sizing, storage keys, job ids, events): `packages/contracts/src/`.
+
+**Gotchas already hit (don't rediscover)**
+- **MinIO images:** official `minio/minio` and `minio/mc` are gone from Docker Hub, and quay.io needs a login. Use the pinned `bitnamilegacy/minio` and `bitnamilegacy/minio-client`. Their home dir isn't writable, so pass `mc --config-dir /tmp/.mc`.
+- **Presigned URLs:** sign with the browser-facing host (`S3_PUBLIC_ENDPOINT`), not `minio:9000`. Keep `requestChecksumCalculation: 'WHEN_REQUIRED'`, because SDK default checksums break browser part uploads.
+- **BullMQ:** custom job ids can't contain `:`. Workers need `maxRetriesPerRequest: null`.
+- **Tailwind v4:** global element styles must live in `@layer base`, or they override utility classes.
+- **Tests in Node:** `navigator.onLine` is undefined, so inject `isOnline` in engine tests.
+- **Shell (zsh):** don't store a multi-word command in a variable and call `$VAR`; use a function. `[ a \> b ]` isn't supported either.
+- **Worker crash tests:** `docker compose kill worker` counts as a manual stop, so `restart: unless-stopped` won't bring it back; `docker compose start worker` afterwards. A killed job is re-picked after the 120 s lock lapses (~3 min). Use `test-media/iphone-14min-portrait.mov` (~10 min encode); `set-5min.mp4` is done in 40 s.
+- **Containers need `init: true`:** Node as PID 1 ignores the SIGTERM NestJS re-sends itself, so stops hang until SIGKILL.
+- **ffmpeg must run niced:** at equal priority it starved Node long enough to lose the BullMQ lock.
+- **Browser automation (Chrome extension):** `file_upload` only takes files under 10 MB. Build a synthetic `File` in the page and assign it through `DataTransfer`. Coordinate clicks sometimes stop reaching the page; check with an in-page `click()` and ask the author to confirm by hand. Don't trigger native dialogs.
+
+**Test media:** `test-media/` is git-ignored. It holds `set-5min.mp4` (5 min, 720p, about 150 MB) and `iphone-14min-portrait.mov` (14 min, 1080p portrait with a rotation flag, 1.6 GB); generate longer files with the ffmpeg command above.

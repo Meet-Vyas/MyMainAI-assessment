@@ -93,10 +93,15 @@ describe('VideosService.delete', () => {
     expect(prisma.video.deleteMany).not.toHaveBeenCalled();
   });
 
-  it('refuses to delete while processing', async () => {
-    const { service, storage } = setup(video({ status: 'PROCESSING' }));
-    await expect(service.delete(ID)).rejects.toThrow(ConflictException);
-    expect(storage.deletePrefix).not.toHaveBeenCalled();
+  it('deletes while processing and sweeps public output again after the row is gone', async () => {
+    const { service, calls } = setup(video({ status: 'PROCESSING' }));
+    await service.delete(ID);
+    expect(calls).toEqual([
+      `s3:delete uploads/${ID}/`,
+      `s3:delete public/videos/${ID}/`,
+      'db:delete',
+      `s3:delete public/videos/${ID}/`,
+    ]);
   });
 
   it('404s for an unknown video', async () => {

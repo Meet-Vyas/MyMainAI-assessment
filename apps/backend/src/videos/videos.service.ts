@@ -56,13 +56,15 @@ export class VideosService {
   /**
    * Storage first, row last: if storage cleanup fails part-way, the row still exists and the
    * delete can simply be retried. Deleting the row first would orphan objects nobody tracks.
+   *
+   * A video can be deleted while the worker is processing it. The worker notices the row is gone
+   * within seconds, stops ffmpeg and removes its own output. One race remains: the worker may
+   * upload its last files after our first sweep and then finish just before the row goes. Every
+   * worker upload happens before that final row update, so a second sweep after the row delete
+   * catches whatever it wrote.
    */
   async delete(id: string): Promise<void> {
     const video = await this.findOrThrow(id);
-    if (video.status === 'PROCESSING') {
-      // A running job would keep writing output after we delete it. Cancelling jobs comes with the worker.
-      throw new ConflictException('Video is processing; wait for it to finish or fail, then delete it');
-    }
     if (video.uploadId) {
       await this.storage.abortMultipartUpload(video.sourceKey, video.uploadId);
     }
@@ -70,6 +72,9 @@ export class VideosService {
     await this.storage.deletePrefix(storageKeys.publicPrefix(id));
     // deleteMany so a concurrent double-delete is a no-op rather than a 500.
     await this.prisma.video.deleteMany({ where: { id } });
+    if (video.status === 'UPLOADED' || video.status === 'PROCESSING') {
+      await this.storage.deletePrefix(storageKeys.publicPrefix(id));
+    }
     await this.events.publish({ kind: 'deleted', videoId: id });
   }
 

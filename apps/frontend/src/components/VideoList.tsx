@@ -137,8 +137,6 @@ function VideoRow({ video, onChanged, onDeleted }: { video: VideoDto } & Omit<Pr
           <ConfirmButton
             onConfirm={onDelete}
             confirmLabel={video.status === 'UPLOADING' ? 'Cancel upload?' : 'Delete for good?'}
-            disabled={video.status === 'PROCESSING'}
-            title={video.status === 'PROCESSING' ? 'Wait for processing to finish or fail before deleting' : undefined}
           >
             {video.status === 'UPLOADING' ? 'Cancel' : 'Delete'}
           </ConfirmButton>

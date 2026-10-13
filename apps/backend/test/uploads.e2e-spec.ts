@@ -146,7 +146,7 @@ describe('multipart upload (browser -> storage)', () => {
     const queue = new Queue(VIDEO_QUEUE, { connection: { url: process.env.E2E_REDIS_URL ?? 'redis://localhost:6379' } });
     try {
       const job = await queue.getJob(processJobId(init.video.id, 0));
-      expect(job?.data).toEqual({ videoId: init.video.id, sourceKey: `uploads/${init.video.id}/source` });
+      expect(job?.data).toEqual({ videoId: init.video.id, sourceKey: `uploads/${init.video.id}/source`, run: 0 });
     } finally {
       await queue.close();
     }
@@ -155,12 +155,22 @@ describe('multipart upload (browser -> storage)', () => {
   it('treats a repeated complete as a no-op', async () => {
     const res = await api<VideoDto>('POST', `/admin/uploads/${init.video.id}/complete`);
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe('UPLOADED');
+    // The worker may already have picked it up; the point is it's not back to UPLOADING.
+    expect(res.body.status).not.toBe('UPLOADING');
   });
 
   it('stops signing once the upload is finished', async () => {
     const res = await api('POST', `/admin/uploads/${init.video.id}/parts`, { partNumbers: [1] });
     expect(res.status).toBe(409);
+  });
+
+  it('the worker rejects the random bytes (named .mp4) as not a video, without retrying', async () => {
+    let video: VideoDto | undefined;
+    for (let i = 0; i < 30 && video?.status !== 'FAILED'; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      video = (await api<VideoDto>('GET', `/admin/videos/${init.video.id}`)).body;
+    }
+    expect(video).toMatchObject({ status: 'FAILED', failureReason: 'Not a readable video file' });
   });
 });
 

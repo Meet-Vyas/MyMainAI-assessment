@@ -68,6 +68,9 @@ services:
 
   backend:
     build: { context: .., dockerfile: infra/Dockerfile, target: backend }
+    # tini as PID 1: Node as PID 1 ignores the SIGTERM NestJS re-sends itself after its shutdown
+    # hooks, so `docker compose stop` would hang for the full grace period and then SIGKILL.
+    init: true
     environment:
       <<: *s3-env
       PORT: 3000
@@ -96,16 +99,28 @@ services:
 
   worker:
     build: { context: .., dockerfile: infra/Dockerfile, target: worker }
+    init: true # see backend
     environment:
       <<: *s3-env
       DATABASE_URL: postgresql://ugn:ugn@postgres:5432/ugn
       REDIS_URL: redis://redis:6379
+      # One ladder encode per container; scale out with `docker compose up --scale worker=N`.
       WORKER_CONCURRENCY: 1
+      WORK_DIR: /tmp/ugn
+      # Matches the CPU limit below. Also caps x264's per-thread frame buffers (memory).
+      FFMPEG_THREADS: 4
+      FFMPEG_PRESET: veryfast
     # Bound resources so one 10-hour transcode cannot starve the host.
     deploy:
       resources:
         limits: { cpus: "4", memory: 4g }
-    volumes: [workertmp:/tmp/ugn]
+    # A crashed worker comes back on its own; BullMQ hands it (or another worker) the stalled job.
+    restart: unless-stopped
+    # On SIGTERM the worker kills ffmpeg and re-queues its job; give it time to do that cleanly.
+    stop_grace_period: 30s
+    # Scratch space for the source copy and HLS output. An anonymous volume, so each replica gets
+    # its own and can safely wipe it on start-up.
+    volumes: ["/tmp/ugn"]
     depends_on:
       # Backend healthy implies migrations have been applied.
       backend: { condition: service_healthy }
@@ -113,6 +128,7 @@ services:
 
   frontend:
     build: { context: .., dockerfile: infra/Dockerfile, target: frontend }
+    init: true # see backend
     environment:
       API_PROXY_TARGET: http://backend:3000
     ports: ["5173:5173"]
@@ -123,4 +139,3 @@ volumes:
   pgdata:
   redisdata:
   miniodata:
-  workertmp:
