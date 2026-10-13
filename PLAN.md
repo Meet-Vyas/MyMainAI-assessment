@@ -11,7 +11,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 
 ## Key design decisions (to justify in ARCHITECTURE.md)
 - **Upload:** S3 multipart with presigned part URLs issued by the backend. The browser PUTs parts straight to MinIO/S3, so file bytes never touch the API.
-  - **Part size:** 16 MiB, scaled up only if needed to stay under 10,000 parts. A 10 GB file is about 640 parts.
+  - **Part size:** 16 MiB, scaled up only if needed to stay under 10,000 parts. A 10 GB file is about 600 parts.
   - **Concurrency:** 4 parts in flight, with per-part retry and backoff.
   - **Resume:** the backend stores the `uploadId` and key in Postgres; the browser keeps a fingerprint (name, size, lastModified) mapped to the videoId in localStorage. On reload, the UI asks the user to re-select the file, the backend calls ListParts, and only the missing parts are sent.
   - **Cleanup:** cancel calls AbortMultipartUpload. A BullMQ repeatable sweeper aborts uploads with no activity for 24h. An S3 lifecycle rule (`AbortIncompleteMultipartUpload` after 2 days) is the backstop.
@@ -31,7 +31,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 ## Milestones
 - [x] 1. **Scaffold.** Set up the npm workspaces, contracts package and tsconfig base. Docker Compose with postgres, redis, minio plus a bucket and CORS init job, backend, worker and frontend. Write `.env.example` files. Make `docker compose up` boot. *(about 2h)*
 - [x] 2. **Backend core.** Prisma `Video` model with status, `uploadId`, keys, duration, renditions, error and attempts, plus a seed admin. jose JWT cookie auth with a guard. Videos CRUD. *(about 1.5h)*
-- [ ] 3. **Multipart upload API.** Endpoints for init, sign parts (batch), list parts, complete and abort, with zod validation. Enqueue the job on complete. Add the sweeper. Add tests. *(about 2h)*
+- [x] 3. **Multipart upload API.** Endpoints for init, sign parts (batch), list parts, complete and abort, with zod validation. Enqueue the job on complete. Add the sweeper. Add tests. *(about 2h)*
 - [ ] 4. **Admin upload UI.** Login screen. Uploader with chunking, concurrency, pause/resume/cancel, speed and ETA, and resume after refresh. Video list with live status through SSE, plus retry and delete. Apply the UGN theme. *(about 2.5h)*
 - [ ] 5. **Worker.** Probe, poster, HLS ladder, upload, progress, retries, idempotency and reconciler. Tests for the state machine. *(about 2.5h)*
 - [ ] 6. **Public playback.** List of READY videos. Player page with detection logic, quality menu, accessible controls, resume watching and the graceful states. `GET /videos/:id/playback`. *(about 2h)*
@@ -48,8 +48,17 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - **Delete order:** abort multipart, then delete `uploads/{id}/`, then `public/videos/{id}/`, then the row. If storage fails, the row survives and the delete is retryable. Deleting while PROCESSING returns 409 until the worker can cancel jobs (milestone 5).
 - **Status transitions:** defined once in `@ugn/contracts` (`canTransition`). READY is terminal; FAILED goes back to UPLOADED on retry; PROCESSING goes back to UPLOADED when the reconciler re-queues a crashed job.
 - **Known audit findings (accepted):** `deepmerge-ts` via the Prisma CLI and `sprintf-js` via ts-jest. Both are DoS bugs in dev/build tooling that never handles request data. Jest was upgraded to 30 to clear the others.
-- **To check in milestone 3:** the browser must be able to read the `ETag` header on part PUT responses (CORS `ExposeHeaders`). Video rows are created by the upload-init endpoint.
-- **To revisit in milestone 5:** let DELETE cancel a PROCESSING job instead of returning 409.
+- **Server-side completion:** on `/complete` the backend lists the parts S3 actually holds, checks every part number and size, and only then assembles the upload. A 409 names the missing/truncated parts so the client re-sends just those. The browser never reads `ETag`, so no CORS `ExposeHeaders` setup is needed (this resolves the earlier milestone 3 note).
+- **Two S3 clients:** one for the backend's own calls (`minio:9000` in Docker) and one that only signs URLs for the host the browser uses (`S3_PUBLIC_ENDPOINT`, `localhost:9000`), because SigV4 signatures cover the host. For phone testing on a LAN, set `S3_PUBLIC_ENDPOINT=http://<LAN-IP>:9000`.
+- **SDK checksum default off for presigning:** newer AWS SDKs add a CRC32 checksum to presigned UploadPart URLs, computed over an empty body, which breaks real browser uploads. Both clients use `requestChecksumCalculation: 'WHEN_REQUIRED'`.
+- **Idempotent complete:** a repeat call after success returns the video. If S3 finished but the row update crashed, the next call sees `NoSuchUpload`, checks that the assembled object exists at the right size, and finishes the transition. The UPLOADING→UPLOADED update is conditional, so concurrent completes can't both win.
+- **Job IDs:** `{videoId}-run{n}` (BullMQ forbids `:`). Enqueueing the same run twice is de-duplicated; an admin retry bumps `attempts` to get a new run. Job options: 3 attempts, exponential backoff from 30s, completed jobs kept 7 days and failed jobs 30 days.
+- **Expired uploads:** if storage has already dropped the multipart upload (lifecycle rule), status and complete return 410 Gone and delete the video.
+- **Abandoned-upload sweeper:** a BullMQ job scheduler (`maintenance` queue, every 15 min, so only one instance sweeps) deletes UPLOADING videos idle for over 24h (`ABANDONED_UPLOAD_TTL_HOURS`). Signing and status calls count as activity. 24h survives a laptop closed overnight and stays under the 48h storage-level backstop.
+- **Custom thumbnail:** a presigned POST (not PUT) so storage itself enforces 5 MiB max and the exact content type. It's stored at `public/videos/{id}/custom-thumbnail` and recorded on complete. It's publicly readable as soon as it's uploaded (admin-only upload, so accepted).
+- **Size limit:** 50 GiB (a 10-hour set at 8 Mbit/s is about 36 GB). The pre-upload type check is extension plus declared MIME; browsers often send `''` for `.mkv`. The real check is ffprobe in the worker.
+- **Cancel** is `DELETE /admin/videos/:id`, which aborts the S3 upload and removes the objects. No separate abort endpoint.
+- **To revisit in milestone 5:** let DELETE cancel a PROCESSING job instead of returning 409. The worker must also treat a job whose video no longer exists (deleted after enqueue) as a no-op, not a failure.
 
 ## Critical files (to be created)
 - `package.json` (workspaces)

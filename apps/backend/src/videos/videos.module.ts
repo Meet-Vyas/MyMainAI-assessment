@@ -7,5 +7,6 @@ import { VideosService } from './videos.service';
   imports: [AuthModule],
   controllers: [AdminVideosController],
   providers: [VideosService],
+  exports: [VideosService],
 })
 export class VideosModule {}

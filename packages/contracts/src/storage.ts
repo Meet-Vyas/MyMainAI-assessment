@@ -8,4 +8,5 @@ export const storageKeys = {
   uploadPrefix: (videoId: string) => `uploads/${videoId}/`,
   source: (videoId: string) => `uploads/${videoId}/source`,
   publicPrefix: (videoId: string) => `public/videos/${videoId}/`,
+  customThumbnail: (videoId: string) => `public/videos/${videoId}/custom-thumbnail`,
 };

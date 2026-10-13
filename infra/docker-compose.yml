@@ -76,6 +76,9 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-0123456789}
       COOKIE_SECURE: "false"
+      # Presigned upload URLs must use the host the browser sees, not the in-network minio:9000.
+      # For testing from a phone on your LAN, set this to http://<your-LAN-IP>:9000.
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ugn.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
     ports: ["3000:3000"]

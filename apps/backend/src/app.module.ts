@@ -3,11 +3,13 @@ import { AuthModule } from './auth/auth.module';
 import { ConfigModule } from './config/config.module';
 import { HealthController } from './health.controller';
 import { PrismaModule } from './prisma/prisma.module';
+import { QueueModule } from './queue/queue.module';
 import { StorageModule } from './storage/storage.module';
+import { UploadsModule } from './uploads/uploads.module';
 import { VideosModule } from './videos/videos.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, StorageModule, AuthModule, VideosModule],
+  imports: [ConfigModule, PrismaModule, StorageModule, QueueModule, AuthModule, VideosModule, UploadsModule],
   controllers: [HealthController],
 })
 export class AppModule {}
