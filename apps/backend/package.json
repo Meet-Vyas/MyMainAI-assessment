@@ -6,17 +6,26 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "dev": "tsc -p tsconfig.build.json --watch",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest",
+    "seed": "node dist/seed.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1151.0",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
     "@ugn/contracts": "*",
+    "@ugn/db": "*",
+    "cookie-parser": "^1.4.7",
+    "jose": "^5.10.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@nestjs/testing": "^11.0.0",
+    "@types/cookie-parser": "^1.4.8",
     "@types/node": "^22.10.0",
     "typescript": "^5.7.2"
   }

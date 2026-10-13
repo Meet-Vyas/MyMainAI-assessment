@@ -30,7 +30,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 
 ## Milestones
 - [x] 1. **Scaffold.** Set up the npm workspaces, contracts package and tsconfig base. Docker Compose with postgres, redis, minio plus a bucket and CORS init job, backend, worker and frontend. Write `.env.example` files. Make `docker compose up` boot. *(about 2h)*
-- [ ] 2. **Backend core.** Prisma `Video` model with status, `uploadId`, keys, duration, renditions, error and attempts, plus a seed admin. jose JWT cookie auth with a guard. Videos CRUD. *(about 1.5h)*
+- [x] 2. **Backend core.** Prisma `Video` model with status, `uploadId`, keys, duration, renditions, error and attempts, plus a seed admin. jose JWT cookie auth with a guard. Videos CRUD. *(about 1.5h)*
 - [ ] 3. **Multipart upload API.** Endpoints for init, sign parts (batch), list parts, complete and abort, with zod validation. Enqueue the job on complete. Add the sweeper. Add tests. *(about 2h)*
 - [ ] 4. **Admin upload UI.** Login screen. Uploader with chunking, concurrency, pause/resume/cancel, speed and ETA, and resume after refresh. Video list with live status through SSE, plus retry and delete. Apply the UGN theme. *(about 2.5h)*
 - [ ] 5. **Worker.** Probe, poster, HLS ladder, upload, progress, retries, idempotency and reconciler. Tests for the state machine. *(about 2.5h)*
@@ -42,7 +42,14 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - **MinIO image:** the official `minio/minio` and `minio/mc` repos are gone from Docker Hub, and quay.io needs a login. We use Bitnami's frozen archive builds `bitnamilegacy/minio:2025.7.23-debian-12-r5` and `bitnamilegacy/minio-client:2025.7.21-debian-12-r3`, pinned so reviewers run exactly what was tested. Production uses real S3, so this only affects local dev.
 - **Bucket layout:** `uploads/` is private (presigned access only); `public/` allows anonymous read for HLS and posters. MinIO's default CORS already allows the frontend origin.
 - **Abandoned multipart uploads (local):** MinIO's `MINIO_API_STALE_UPLOADS_EXPIRY=48h` stands in for S3's `AbortIncompleteMultipartUpload` lifecycle rule.
-- **To check in milestone 3:** the browser must be able to read the `ETag` header on part PUT responses (CORS `ExposeHeaders`).
+- **Shared `packages/db`:** the Prisma schema, migrations and client live in their own workspace (not `apps/backend`) because the worker also writes video status. Prisma 6 and jose 5 rather than the newest majors: both still ship CommonJS, which NestJS compiles to. Prisma 7 would change client generation and add driver adapters for no benefit here.
+- **Auth:** scrypt (built into Node, no native add-on) with a `scrypt$N$r$p$salt$hash` format so parameters can be raised later. JWT is HS256 with issuer/audience checks, 8h expiry, in an httpOnly `SameSite=Lax` cookie (`Secure` via `COOKIE_SECURE`). An unknown email is checked against a dummy hash, so timing doesn't reveal which emails exist. The frontend proxies `/api`, so the cookie is same-origin.
+- **Seed:** runs on every backend start and is idempotent. Changing `ADMIN_PASSWORD` and restarting resets the password.
+- **Delete order:** abort multipart, then delete `uploads/{id}/`, then `public/videos/{id}/`, then the row. If storage fails, the row survives and the delete is retryable. Deleting while PROCESSING returns 409 until the worker can cancel jobs (milestone 5).
+- **Status transitions:** defined once in `@ugn/contracts` (`canTransition`). READY is terminal; FAILED goes back to UPLOADED on retry; PROCESSING goes back to UPLOADED when the reconciler re-queues a crashed job.
+- **Known audit findings (accepted):** `deepmerge-ts` via the Prisma CLI and `sprintf-js` via ts-jest. Both are DoS bugs in dev/build tooling that never handles request data. Jest was upgraded to 30 to clear the others.
+- **To check in milestone 3:** the browser must be able to read the `ETag` header on part PUT responses (CORS `ExposeHeaders`). Video rows are created by the upload-init endpoint.
+- **To revisit in milestone 5:** let DELETE cancel a PROCESSING job instead of returning 409.
 
 ## Critical files (to be created)
 - `package.json` (workspaces)

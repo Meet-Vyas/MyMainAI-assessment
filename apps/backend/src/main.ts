@@ -1,17 +1,17 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
+import { APP_CONFIG, type AppConfig } from './config/config';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const config = app.get<AppConfig>(APP_CONFIG);
   app.setGlobalPrefix('api');
-  app.enableCors({
-    origin: (process.env.CORS_ORIGINS ?? 'http://localhost:5173').split(','),
-    credentials: true,
-  });
+  app.use(cookieParser());
+  app.enableCors({ origin: config.CORS_ORIGINS.split(','), credentials: true });
   app.enableShutdownHooks();
-  const port = Number(process.env.PORT ?? 3000);
-  await app.listen(port, '0.0.0.0');
-  console.log(`backend listening on :${port}`);
+  await app.listen(config.PORT, '0.0.0.0');
+  console.log(`backend listening on :${config.PORT}`);
 }
 bootstrap();

@@ -1,0 +1,62 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Mirrors VideoStatus in @ugn/contracts.
+enum VideoStatus {
+  UPLOADING
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
+model Video {
+  id          String      @id @default(uuid()) @db.Uuid
+  title       String
+  description String      @default("")
+  status      VideoStatus @default(UPLOADING)
+
+  // Upload. fileSize is BigInt because 10 GB+ overflows a 32-bit int.
+  fileName           String
+  fileSize           BigInt
+  mimeType           String
+  sourceKey          String
+  /// S3 multipart upload id; set while UPLOADING, cleared on complete/abort.
+  uploadId           String?
+  partSize           Int?
+  customThumbnailKey String?
+
+  // Processing.
+  /// 0-100 while PROCESSING.
+  progress      Int     @default(0)
+  attempts      Int     @default(0)
+  failureReason String?
+  durationSec   Float?
+  width         Int?
+  height        Int?
+  /// Versioned output prefix of the live rendition set, swapped atomically when a job succeeds.
+  hlsPrefix     String?
+  posterKey     String?
+  renditions    Json?
+
+  /// Bumped on upload activity; the abandoned-upload sweeper keys off this.
+  lastActivityAt DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([status, lastActivityAt])
+  @@index([status, createdAt])
+}
