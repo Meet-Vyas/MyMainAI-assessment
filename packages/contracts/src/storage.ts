@@ -19,6 +19,7 @@ export const storageKeys = {
   outputPrefix: (videoId: string, outputId: string) => `public/videos/${videoId}/hls/${outputId}/`,
 };
 
-/** File names inside an output prefix. */
+/** File names inside an output prefix. Each rendition lives in `{rendition name}/`. */
 export const HLS_MASTER_PLAYLIST = 'master.m3u8';
+export const HLS_VARIANT_PLAYLIST = 'index.m3u8';
 export const POSTER_FILE = 'poster.jpg';

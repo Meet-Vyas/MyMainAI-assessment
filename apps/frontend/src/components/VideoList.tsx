@@ -1,7 +1,8 @@
 import { useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import toast from 'react-hot-toast';
-import { Film, FolderOpen, RotateCcw } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Film, FolderOpen, Play, RotateCcw } from 'lucide-react';
 import type { VideoDto } from '@ugn/contracts';
 import { api } from '../lib/api';
 import { formatBytes, formatDuration } from '../lib/format';
@@ -127,6 +128,11 @@ function VideoRow({ video, onChanged, onDeleted }: { video: VideoDto } & Omit<Pr
               <FolderOpen className="size-4" aria-hidden /> Resume
             </button>
           </>
+        )}
+        {video.status === 'READY' && (
+          <Link to={`/videos/${video.id}`} className={ui.btnSecondary} aria-label={`Watch ${video.title}`}>
+            <Play className="size-4" aria-hidden /> Watch
+          </Link>
         )}
         {video.status === 'FAILED' && (
           <button type="button" className={ui.btnSecondary} onClick={onRetry}>

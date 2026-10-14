@@ -1,5 +1,3 @@
-import { motion } from 'framer-motion';
-
 interface Props {
   /** 0-100 */
   value: number;
@@ -18,11 +16,11 @@ export function ProgressBar({ value, label, tone = 'primary' }: Props) {
       aria-valuenow={Math.round(pct)}
       className="h-2 w-full overflow-hidden rounded-full bg-ink-800"
     >
-      <motion.div
-        className={`h-full rounded-full ${tone === 'primary' ? 'bg-primary' : 'bg-ink-500'}`}
-        initial={false}
-        animate={{ width: `${pct}%` }}
-        transition={{ ease: 'easeOut', duration: 0.3 }}
+      {/* A CSS transition, not Framer Motion, because the public watch page uses this too and
+          shouldn't pull in the animation library. */}
+      <div
+        className={`h-full rounded-full transition-[width] duration-300 ease-out motion-reduce:transition-none ${tone === 'primary' ? 'bg-primary' : 'bg-ink-500'}`}
+        style={{ width: `${pct}%` }}
       />
     </div>
   );

@@ -25,3 +25,53 @@
     @apply font-display tracking-wide text-white;
   }
 }
+
+/* Player sliders (seek and volume). The track paints played / buffered / rest from two custom
+   properties, so one element shows all three. Thumb and track need per-engine pseudo-elements. */
+@layer components {
+  .ugn-range {
+    --track: linear-gradient(
+      to right,
+      var(--color-primary) var(--played, 0%),
+      rgb(255 255 255 / 0.45) var(--played, 0%) var(--buffered, 0%),
+      rgb(255 255 255 / 0.2) var(--buffered, 0%)
+    );
+    appearance: none;
+    height: 1.25rem;
+    background: transparent;
+    cursor: pointer;
+    /* A horizontal drag on the bar is a seek, never a page scroll. */
+    touch-action: none;
+  }
+  .ugn-range:focus-visible {
+    outline: 2px solid white;
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+  .ugn-range::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 9999px;
+    background: var(--track);
+  }
+  .ugn-range::-moz-range-track {
+    height: 4px;
+    border-radius: 9999px;
+    background: var(--track);
+  }
+  .ugn-range::-webkit-slider-thumb {
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border-radius: 9999px;
+    background: var(--color-primary);
+    border: 2px solid white;
+  }
+  .ugn-range::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 9999px;
+    background: var(--color-primary);
+    border: 2px solid white;
+  }
+}

@@ -117,8 +117,9 @@ After changing `packages/contracts`, run `npm run build -w @ugn/contracts` befor
 - Inspect storage: `docker compose exec -T minio mc --config-dir /tmp/.mc alias set local http://localhost:9000 minioadmin minioadmin`, then `... mc --config-dir /tmp/.mc ls -r [--incomplete] local/ugn-videos`.
 
 **Where things are**
-- Backend modules: `apps/backend/src/{auth,videos,uploads,storage,queue,events,config,prisma}`. E2E tests are in `apps/backend/test/`.
+- Backend modules: `apps/backend/src/{auth,videos,uploads,playback,storage,queue,events,config,prisma}`. `playback/` is the public, unauthenticated API (`GET /videos`, `GET /videos/:id/playback`). E2E tests are in `apps/backend/test/`.
 - Upload engine (core client logic, unit-tested): `apps/frontend/src/upload/UploadEngine.ts`.
+- Player: `apps/frontend/src/player/`. `playbackMode.ts` (native vs hls.js detection), `playbackSource.ts` (attaches either engine, quality switching), `playbackErrors.ts` (error decisions), `watchProgress.ts` (resume), `VideoPlayer.tsx` (controls, shortcuts, fullscreen). The pure modules are unit-tested. Pages: `pages/HomePage.tsx` (library), `pages/WatchPage.tsx` (all playback states).
 - Worker: `apps/worker/src/processing/video-job.runner.ts` (pipeline + state machine, unit-tested with fakes), `video.processor.ts` (BullMQ glue, shutdown), `reconciler.service.ts`, `media/` (ffprobe, ladder, ffmpeg args).
 - Shared rules (state machine, part sizing, storage keys, job ids, events): `packages/contracts/src/`.
 
@@ -133,5 +134,6 @@ After changing `packages/contracts`, run `npm run build -w @ugn/contracts` befor
 - **Containers need `init: true`:** Node as PID 1 ignores the SIGTERM NestJS re-sends itself, so stops hang until SIGKILL.
 - **ffmpeg must run niced:** at equal priority it starved Node long enough to lose the BullMQ lock.
 - **Browser automation (Chrome extension):** `file_upload` only takes files under 10 MB. Build a synthetic `File` in the page and assign it through `DataTransfer`. Coordinate clicks sometimes stop reaching the page; check with an in-page `click()` and ask the author to confirm by hand. Don't trigger native dialogs.
-
-**Test media:** `test-media/` is git-ignored. It holds `set-5min.mp4` (5 min, 720p, about 150 MB) and `iphone-14min-portrait.mov` (14 min, 1080p portrait with a rotation flag, 1.6 GB); generate longer files with the ffmpeg command above.
+- **Desktop Chrome plays HLS natively now** (`canPlayType` returns `"maybe"`), so it takes the native path. Add `?player=hlsjs` (or `?player=native`) to a watch URL to test the other engine.
+- **Player layout follows the player's width, not the screen's** (container queries on the player). A portrait video on a laptop is a narrow player. After changing the control bar, check portrait and landscape videos at laptop and phone sizes with a 10 h timestamp; the Full screen button once got clipped this way.
+- **Chrome extension can drop mid-session.** Fall back to headless Chrome over the DevTools protocol (`--headless=new --remote-debugging-port`, Node's global `WebSocket`); `Emulation.setDeviceMetricsOverride` covers phone sizes but not `pointer: coarse`. Safari can only be automated through `safaridriver`, which the author must enable once (`sudo safaridriver --enable` plus Develop → Allow Remote Automation).

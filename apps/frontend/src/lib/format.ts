@@ -37,3 +37,27 @@ export function formatDuration(seconds: number | null): string {
   const sec = String(s % 60).padStart(2, '0');
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
 }
+
+/**
+ * Parses a time a person typed or a `?t=` link carries: "7:42:10", "07:42:10", "42:10", "90",
+ * "7h42m10s", "2m". Returns seconds, or null if it isn't a time. After the first colon field,
+ * minutes and seconds must be under 60 ("1:75:00" is a typo, not 2:15:00).
+ */
+export function parseTimecode(input: string): number | null {
+  const text = input.trim().toLowerCase();
+  if (/^\d+(\.\d+)?$/.test(text)) return Number(text);
+
+  const colon = /^(\d+)(?::(\d{1,2}))?(?::(\d{1,2}))?$/.exec(text);
+  if (colon) {
+    const fields = colon.slice(1).filter((f) => f !== undefined).map(Number);
+    if (fields.slice(1).some((f) => f >= 60)) return null;
+    return fields.reduce((total, f) => total * 60 + f, 0);
+  }
+
+  const units = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(text);
+  if (units && text !== '') {
+    const [h, m, s] = units.slice(1).map((f) => Number(f ?? 0));
+    return h * 3600 + m * 60 + s;
+  }
+  return null;
+}

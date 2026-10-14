@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
-import type { InitUploadResponse, SignPartsResponse, VideoDto } from '@ugn/contracts';
+import type { InitUploadResponse, PlaybackResponse, PublicVideoSummary, SignPartsResponse, VideoDto } from '@ugn/contracts';
 
 /**
  * Upload -> worker -> HLS, against the running Docker stack. Needs the worker container, which is
@@ -47,6 +47,12 @@ function makeClip(): Buffer {
   );
 }
 
+/** The public API, called without the admin cookie, as a viewer would. */
+async function publicGet<T>(path: string): Promise<{ status: number; cacheControl: string | null; body: T }> {
+  const res = await fetch(`${API}${path}`);
+  return { status: res.status, cacheControl: res.headers.get('cache-control'), body: (await res.json()) as T };
+}
+
 async function waitForStatus(id: string, done: (v: VideoDto) => boolean, timeoutMs: number): Promise<VideoDto> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -90,6 +96,16 @@ describe('processing a real video into HLS', () => {
     const put = await fetch(signed.body.parts[0].url, { method: 'PUT', body: new Blob([new Uint8Array(clip)]) });
     expect(put.status).toBe(200);
     expect((await api('POST', `/admin/uploads/${id}/complete`)).status).toBe(200);
+  });
+
+  it('is public but not playable (and not cached) before processing finishes', async () => {
+    const res = await publicGet<PlaybackResponse>(`/videos/${id}/playback`);
+    expect(res.status).toBe(200);
+    expect(res.cacheControl).toBe('no-store');
+    expect(['UPLOADED', 'PROCESSING']).toContain(res.body.status);
+    expect(res.body).toMatchObject({ manifestUrl: null, renditions: [] });
+    const library = await publicGet<PublicVideoSummary[]>('/videos');
+    expect(library.body.map((v) => v.id)).not.toContain(id);
   });
 
   it('becomes READY with the real duration and a poster', async () => {
@@ -138,9 +154,43 @@ describe('processing a real video into HLS', () => {
     expect(res.headers.get('content-type')).toBe('image/jpeg');
   });
 
+  it('GET /videos/:id/playback gives a viewer everything the player needs', async () => {
+    const res = await publicGet<PlaybackResponse>(`/videos/${id}/playback`);
+    expect(res.status).toBe(200);
+    expect(res.cacheControl).toBe('public, max-age=0, s-maxage=60');
+    expect(res.body).toMatchObject({
+      id,
+      status: 'READY',
+      manifestUrl: `${MEDIA_BASE}/${outputPrefix}master.m3u8`,
+      posterUrl: video.posterUrl,
+      width: 1280,
+      height: 720,
+    });
+    expect(res.body.durationSec).toBeCloseTo(14, 0);
+    expect(res.body.renditions.map((r) => r.name)).toEqual(['720p', '480p', '360p']);
+    // Every advertised rendition playlist exists, for the native-player quality switch.
+    for (const r of res.body.renditions) {
+      const playlist = await fetch(r.playlistUrl, { headers: { origin: ORIGIN } });
+      expect(playlist.status).toBe(200);
+      expect(playlist.headers.get('access-control-allow-origin')).toBeTruthy();
+    }
+  });
+
+  it('lists the READY video in the public library', async () => {
+    const library = await publicGet<PublicVideoSummary[]>('/videos');
+    expect(library.status).toBe(200);
+    expect(library.body.find((v) => v.id === id)).toMatchObject({ title: 'E2E processing', width: 1280, height: 720 });
+  });
+
+  it('404s for unknown and malformed ids', async () => {
+    expect((await publicGet('/videos/0b7e6a62-1111-4c55-9a43-1f0a8a1c2b10/playback')).status).toBe(404);
+    expect((await publicGet('/videos/not-a-uuid/playback')).status).toBe(404);
+  });
+
   it('delete removes the source and every processed object', async () => {
     expect((await api('DELETE', `/admin/videos/${id}`)).status).toBe(204);
     expect((await listKeys(`uploads/${id}/`)).keys).toEqual([]);
     expect((await listKeys(`public/videos/${id}/`)).keys).toEqual([]);
+    expect((await publicGet(`/videos/${id}/playback`)).status).toBe(404);
   });
 });

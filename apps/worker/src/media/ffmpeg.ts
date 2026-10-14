@@ -1,4 +1,4 @@
-import { HLS_MASTER_PLAYLIST } from '@ugn/contracts';
+import { HLS_MASTER_PLAYLIST, HLS_VARIANT_PLAYLIST } from '@ugn/contracts';
 import { AUDIO_KBPS, type PlannedRendition } from './ladder';
 import { runProcess } from './run-process';
 
@@ -81,7 +81,7 @@ export function hlsArgs(o: HlsOptions): string[] {
     // Machine-readable progress on stdout; human stats off.
     '-progress', 'pipe:1',
     '-nostats',
-    `${o.outDir}/%v/index.m3u8`,
+    `${o.outDir}/%v/${HLS_VARIANT_PLAYLIST}`,
   );
   return args;
 }

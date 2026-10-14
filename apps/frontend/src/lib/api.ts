@@ -3,6 +3,8 @@ import type {
   InitUploadRequest,
   InitUploadResponse,
   LoginRequest,
+  PlaybackResponse,
+  PublicVideoSummary,
   SignPartsResponse,
   ThumbnailUploadRequest,
   ThumbnailUploadResponse,
@@ -71,6 +73,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+  library: () => request<PublicVideoSummary[]>('GET', '/videos'),
+  playback: (id: string) => request<PlaybackResponse>('GET', `/videos/${encodeURIComponent(id)}/playback`),
+
   me: () => request<AuthUser>('GET', '/auth/me'),
   login: (body: LoginRequest) => request<AuthUser>('POST', '/auth/login', body),
   logout: () => request<void>('POST', '/auth/logout'),

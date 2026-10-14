@@ -22,7 +22,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
   - **Progress:** parsed from ffmpeg `-progress`, sent via `job.updateProgress`, and written through to the DB (throttled).
   - **Zombie recovery:** stalled jobs get re-queued, plus a reconciler that re-queues or fails UPLOADED/PROCESSING rows whose job is missing, failed or back in the queue. SIGTERM re-queues the running job without using an attempt.
 - **HLS:** H.264 High profile (`yuv420p`) with AAC-LC, **MPEG-TS** segments of 6s with keyframes forced every 2 s (time-based, so variable-frame-rate phone video aligns too; no scene-cut), and VOD playlists. The ladder is the top 3 of 1080p/720p/480p/360p **at or below the source** (never upscaled), using capped CRF. One encode pass produces all renditions with `-var_stream_map` and a master playlist. This gives fast start and quick seeks. *(Settled in M5; see the decisions log.)*
-- **Playback:** if `video.canPlayType('application/vnd.apple.mpegurl')`, use native playback (Safari, iOS, most webviews). Otherwise, if `Hls.isSupported()`, use hls.js. Otherwise, show the unsupported state.
+- **Playback:** if `video.canPlayType('application/vnd.apple.mpegurl')`, use native playback (Safari, iOS, most webviews, and now recent desktop Chrome). Otherwise, if MSE can play H.264/AAC, use hls.js. Otherwise, show the unsupported state. *(Built in M6; see the decisions log.)*
   - Use `playsinline` and `muted`-free autoplay avoidance, plus a custom accessible control bar and a quality selector.
   - Resume position is saved per video in localStorage.
 - **Storage headers:** CORS on the bucket. `.m3u8` gets `application/vnd.apple.mpegurl` with `max-age=60` (raised from the planned 10 s, since versioned prefixes mean playlists never change in place). Segments and posters get `max-age=31536000, immutable`. Set per object by the worker at upload.
@@ -34,7 +34,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - [x] 3. **Multipart upload API.** Endpoints for init, sign parts (batch), list parts, complete and abort, with zod validation. Enqueue the job on complete. Add the sweeper. Add tests. *(about 2h)*
 - [x] 4. **Admin upload UI.** Login screen. Uploader with chunking, concurrency, pause/resume/cancel, speed and ETA, and resume after refresh. Video list with live status through SSE, plus retry and delete. Apply the UGN theme. *(about 2.5h)*
 - [x] 5. **Worker.** Probe, poster, HLS ladder, upload, progress, retries, idempotency and reconciler. Tests for the state machine. *(about 2.5h)*
-- [ ] 6. **Public playback.** List of READY videos. Player page with detection logic, quality menu, accessible controls, resume watching and the graceful states. `GET /videos/:id/playback`. *(about 2h)*
+- [x] 6. **Public playback.** List of READY videos. Player page with detection logic, quality menu, accessible controls, resume watching and the graceful states. `GET /videos/:id/playback`. *(about 2h)*
 - [ ] 7. **Verification.** Generate 10h and ~10GB test files. Test kill/resume for uploads, kill the worker mid-job, and test on devices. Fill in the test matrix. *(about 1.5h)*
 - [ ] 8. **Docs.** README (including AI usage and assumptions), ARCHITECTURE (with a mermaid diagram) and ANSWERS W1–W7. Demo video if time allows. *(about 2h)*
 
@@ -75,7 +75,7 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - **Retry:** `POST /admin/videos/:id/retry` does a conditional FAILED→UPLOADED, increments `attempts` and enqueues run n+1, so a double-click can't queue two runs.
 - **UI notes:** destructive actions use an inline two-step confirm (no `window.confirm`). Status changes are announced through an `aria-live` region. Framer Motion respects reduced motion. The left column isn't sticky, since a sticky element taller than the screen hides its bottom.
 - **Vitest 5** (not 3) because Vitest 3 has critical advisories; it supports our Vite 6.4.
-- **To do in milestone 6:** split the bundle (currently >500 KB) so public viewers don't download the admin uploader.
+- ~~To do in milestone 6: split the bundle (currently >500 KB) so public viewers don't download the admin uploader.~~ Done, see milestone 6.
 - **Browser-verified (Chrome, desktop):**
   - Login error and success.
   - Client rejects a renamed `.exe`.
@@ -180,6 +180,86 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
   - Portrait videos exist (1080x1920), so the player must not assume 16:9.
 - **Compose gotcha:** recreating a container keeps a volume previously mounted at the same path, so switching `workertmp` to an anonymous volume needed `docker compose up -d --force-recreate --renew-anon-volumes worker` before the old volume could be removed (done).
 - **Not verified yet:** a real OOM kill, Redis restart mid-job, `--scale worker=2` (should work: separate scratch volumes, BullMQ locks, ownership rule), and a full 10 h file (milestone 7).
+
+### Milestone 6: public playback
+- **API** (`apps/backend/src/playback/`, public, no auth). Shapes are in `packages/contracts/src/playback.ts`.
+  - `GET /videos`: the library. READY videos only, newest first, capped at 200 (a real library would paginate with a cursor). A READY row missing its output is skipped, so the list can't link to a dead player.
+  - `GET /videos/:id/playback`: `status`, `progress`, `manifestUrl` (master), `posterUrl`, `durationSec`, `width`/`height` (after rotation), `renditions` (highest first, each with its own `playlistUrl`). Every playback field is null/empty until READY, so one response drives the processing, failed and ready states.
+  - No admin-only fields go out: no file name/size, source key, or `failureReason` (it can hold ffmpeg/path details). The public page only says "couldn't be processed".
+  - An unknown or malformed id is a 404 (not a 400): a broken shared link is "not found" to a viewer.
+  - `Cache-Control`: READY answers get `public, max-age=0, s-maxage=60` (browsers revalidate with the ETag Express sends; a CDN may hold it 60 s, the same window as the playlists). Anything else gets `no-store`, because the page polls it.
+  - Assumption: a video is public as soon as it's READY. There's no draft/unlisted flag; private videos are W5.
+  - `HLS_VARIANT_PLAYLIST` (`index.m3u8`) moved into contracts; the worker's ffmpeg args use it, so the API and worker agree on the path.
+- **Engine detection** (`apps/frontend/src/player/playbackMode.ts`), decided once per page:
+  1. `canPlayType('application/vnd.apple.mpegurl') !== ''` → **native**. Covers Safari, every iOS browser and in-app webview (all WebKit), Android Chrome, Samsung Internet. Preferred because it's the only option on older iPhones, keeps AirPlay and the system fullscreen player, and uses less battery than JavaScript demuxing.
+  2. Else `(ManagedMediaSource ?? MediaSource).isTypeSupported('video/mp4; codecs="avc1.640028,mp4a.40.2"')` → **hls.js**. Firefox, older desktop Chrome/Edge. The check runs without loading hls.js, then `Hls.isSupported()` confirms after the import.
+  3. Else → **unsupported** state, with the stream URL for VLC.
+  - `?player=native|hlsjs` forces an engine (only if the browser can do it), for testing both paths in one browser.
+  - **Finding:** current desktop Chrome returns `"maybe"`, so it takes the native path (Chrome has added built-in HLS). Both paths were verified in Chrome via the override.
+- **hls.js** is imported dynamically, so native-HLS devices never download it. It uses the **light build** (`hls.js/light`, 372 KB vs 595 KB), which leaves out subtitles, alternate audio and DRM; we don't use those. Switch to the full build if WebVTT captions are added. Config:
+  - `capLevelToPlayerSize` (counts device pixel ratio), so a phone-sized player never pulls 1080p.
+  - `startLevel: -1`: start from the bandwidth estimate (a low rung), then climb. Fast first frame.
+  - `maxBufferLength 30` / `maxMaxBufferLength 60` ahead, `backBufferLength 30` behind. The default keeps everything played, which over a 10 h set would grow to gigabytes of memory.
+  - `startPosition` = the resume point, so hls.js loads from there instead of from 0.
+- **Quality selector.**
+  - hls.js: `hls.currentLevel` (switches now, flushing the buffer; `nextLevel` would wait a segment), matched to our renditions by resolution; Auto = `-1`.
+  - Native players have no rendition API, so a manual pick plays that rendition's own media playlist (`playlistUrl`) from the same position; Auto goes back to the master. `play()` is called inside the click handler, so iOS still treats it as user-initiated.
+  - "Auto (720p)" shows what's playing from `videoWidth/videoHeight` (updated on `resize`), which works for both engines. Names follow the short side, so portrait 720x1280 is "720p".
+- **Errors.** Pure decision functions in `playbackErrors.ts` (unit-tested).
+  - hls.js already retries and switches down by itself; it only reports `fatal` once those run out. Fatal network → "Couldn't load the video" with **Try again**. Fatal media → `recoverMediaError()` up to 2 times (the budget resets after a clean fragment), then fail. Incompatible codecs → unsupported.
+  - Native: MediaError 2 → network; 3 and 4 → a neutral "Playback stopped because of an error" (Chrome reports a failed segment fetch as 4, too), or network when offline; 1 (aborted) ignored.
+  - Try again re-attaches the source at the last position.
+  - Offline: a chip says playback continues on reconnect. On the browser's `online` event a network-failed player retries by itself. **Bug found and fixed in testing:** the first version retried on *any* network error while online, which looped silently against a blocked CDN; now only the offline→online event auto-retries.
+- **Controls** (custom, because native controls differ per browser and can't host a quality menu).
+  - The region is focusable (`role="region"`, `aria-roledescription="video player"`). YouTube's keys: Space/K, ←/→ 5 s, J/L 10 s, ↑/↓ volume, M, F, 0–9, Home/End. Keys that a focused control owns (Space on a button, arrows on a slider) are left to it. `aria-keyshortcuts` on the buttons, plus a "Keyboard shortcuts" list on the page.
+  - Seek bar: a native `<input type=range>` (free keyboard and screen-reader support) with `aria-valuetext` "7:42:10 of 10:00:00". Arrows step 5 s, PageUp/Down 60 s (the browser default of 1% is 6 minutes on a 10 h video). Dragging only moves the thumb and shows a time bubble; it seeks once on release, so dragging across 10 h doesn't fire hundreds of segment requests. Clicks and screen-reader changes seek at once. Played and buffered ranges are painted on the one track with two CSS variables.
+  - Quality menu: WAI-ARIA menu button with `menuitemradio` items. Opening focuses the checked item; arrows/Home/End move; Enter/Space pick; Esc closes and returns focus.
+  - An `aria-live` region announces shortcut actions ("Forward 10 seconds", "Quality 480p", "Muted").
+  - Controls auto-hide after 3 s of playback but stay visible while paused, while a menu is open, while dragging, on error, and while keyboard focus is inside. They stay in the accessibility tree when hidden.
+  - Mouse click on the picture plays/pauses; a tap toggles the controls (the phone convention); double-click toggles fullscreen.
+  - Optional controls drop out by the **player's** width (CSS container queries), not the screen's, because a portrait video on a laptop is a narrow player on a wide screen. The full set needs about 610 px with a 10 h timestamp. Volume slider from 42rem, ±10 s and PiP from 36rem, the quality label from 28rem, and "/ total" from 24rem. Play, mute, time, quality and fullscreen always fit. No volume slider on coarse pointers either (iOS ignores page-set volume). PiP only where `document.pictureInPictureEnabled`.
+  - Portrait players are at least 20rem wide (a portrait video on a phone held sideways would otherwise be 165 px).
+- **Mobile and webviews.**
+  - `playsinline` plus the old `webkit-playsinline` (older iOS webviews, Facebook/Instagram), `x-webkit-airplay="allow"`, `preload="metadata"`, no autoplay.
+  - Fullscreen (`player/fullscreen.ts`): the standard API (or `webkitRequestFullscreen`) on our container, so our controls stay. On iPhone, where only a `<video>` can go fullscreen, `webkitEnterFullscreen()` and iOS's own player, which handles rotation. On Android a landscape video locks the screen to landscape while fullscreen; refusals are ignored.
+  - Media Session metadata (title, poster) for lock-screen controls.
+  - The player box takes its aspect ratio from the API's width/height before anything loads (no layout jump), and portrait videos are sized to fit 75% of the viewport height.
+- **Resume watching** (`player/watchProgress.ts`, unit-tested): one localStorage entry holding the 50 most recently watched videos.
+  - Saved every 5 s, and on pause, seek, `pagehide` and page hidden (mobile may never fire unload), but only after real playback, so a page that sat at 0:00 can't overwrite a saved spot.
+  - Under 10 s isn't saved. Within 30 s of the end counts as finished and is cleared, as is `ended`.
+  - Every storage access is guarded: private mode and some webviews throw.
+  - A "Resumed at 1:02:03 · Start over" chip shows on resume. The library shows a "Continue watching" bar.
+- **Fast seek for long sets:** "Jump to time" accepts `7:42:10`, `42:10`, `90`, `7h42m10s` (`parseTimecode`, unit-tested), and `?t=` links take the same formats. A `?t=` link wins over the saved position. Seeking fetches only the segment at that time: verified that a jump to 4:00 requested `seg_00040`/`seg_00041` and nothing between.
+- **Graceful states** on the watch page: loading skeleton; not found (unknown, malformed or deleted id); uploading/queued/processing with live % (polls every 5 s; viewers have no SSE, which is admin-only), turning into the player by itself; failed; unsupported browser; API unreachable with Try again. In the player: buffering spinner, fatal error with Try again, offline chip.
+- **Bundle:** `AdminPage` and `LoginPage` are lazy chunks. Framer Motion moved into the admin page (the shared `ProgressBar` now uses a CSS transition). The session check (`/auth/me`) only runs when an admin screen calls `useAuth`, so public viewers don't send a request that 401s. Main chunk 522 → 410 KB (125 KB gzipped); hls.js is a separate chunk.
+  - The auth and upload providers stay above the routes, so an upload keeps running while the admin opens the public pages (READY rows in the admin list now have a **Watch** link).
+- **Tests added:**
+  - Backend unit: `playback/playback.service.spec.ts` (12): READY response, rendition order and URLs, malformed rendition JSON, each non-READY status exposes nothing playable, no admin-only fields, 404 for unknown and malformed ids (without a DB query), library filter/order/cap, READY-without-output skipped.
+  - e2e (`processing.e2e-spec.ts`, against a real transcode): public and `no-store` before READY and absent from the library; READY response with the exact master URL, 3 renditions, each `playlistUrl` fetchable with CORS; `s-maxage` header; listed in the library; 404 for unknown/malformed; 404 after delete.
+  - Frontend unit: `playbackMode.test.ts`, `playbackErrors.test.ts`, `watchProgress.test.ts`, `parseTimecode` in `format.test.ts`.
+- **Verified in headless desktop Chrome** (driven over the DevTools protocol; the Chrome extension wasn't connected), both engines via `?player=`:
+  - Library cards (portrait posters letterboxed, not cropped), no `/auth/me` request on public pages.
+  - Native: ABR started at 360p and climbed to 720p; hls.js chunk not downloaded. hls.js: started on the estimate, Auto label tracked the level.
+  - Keyboard: K play, L +10 s, → +5 s, 5 → 50%, M mute (announced), Space pause with the region focused.
+  - Quality menu: focus on the checked item; 480p switched (`videoHeight` 480) in both engines; Auto went back to 720p.
+  - Resume: reload showed "Resumed at 2:42" and continued from 2:42 in both engines.
+  - States: unknown id, malformed id, an UPLOADING video ("still uploading"), deleted while viewing (next poll → not found), unsupported (canPlayType and MSE stubbed out).
+  - Offline mid-play (hls.js): kept playing from the buffer, then spinner plus offline chip, then resumed by itself on reconnect.
+  - Blocked segments while online: hls.js showed the network error after its retries; native showed the error at once; Try again resumed from the same position in both.
+  - Phone-sized viewport (390x844, emulated): portrait video fits, no horizontal scroll.
+  - **Bug found by the author in Safari, reproduced in Chrome:** on a 1440x860 laptop the portrait player is 363 px wide, the control row needed 432 px, and Full screen and PiP were clipped off the edge (Full screen was only reachable with `F`). The hiding rules were keyed to screen width, so a narrow player on a wide screen showed everything. Fixed with container queries (see Controls). Re-checked portrait and landscape videos at 1920x1080, 1440x860, 1280x720, 1024x700, 390x844, 320x568, 844x390 and 667x375 with a 10 h timestamp injected: the row fits and Full screen is inside the player at every size.
+- **Verified in real desktop Chrome** (extension, native engine, real mouse and keyboard input):
+  - A click on the picture starts playback; ABR moved from 360p to 720p within seconds.
+  - Dragging the seek thumb to mid-timeline seeked once on release (to 2:33) and fetched only `seg_00025`/`seg_00026`; playback continued.
+  - Controls hid after 3 s without mouse movement.
+  - The Full screen button put our container (with our controls) in fullscreen; `F` left it and focus stayed on the button.
+- **Safari (macOS), checked by hand by the author:** resume landed at the right time; the clipped Full screen button above was found here.
+- **Not verified yet** (milestone 7): the rest of Safari (macOS) and iOS Safari, Firefox, Edge, Android Chrome, Samsung Internet, Instagram/FB/TikTok webviews, VLC; real touch behaviour (tap to show controls, drag-seek on iOS/Android, orientation lock); VoiceOver/NVDA; seeking within a real 10 h file.
+- **Known limitations (for W7):**
+  - A native-mode quality switch reloads the stream and briefly fetches the first segment of the new rendition before the seek lands.
+  - Volume and mute aren't remembered between videos.
+  - No Open Graph tags (needs server-rendered HTML), so links shared to Instagram/Facebook show no preview card.
+  - CSS `aspect-ratio` needs iOS 15+; older iPhones get a collapsed box.
 
 ## Critical files (to be created)
 - `package.json` (workspaces)
