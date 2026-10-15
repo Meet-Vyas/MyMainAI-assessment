@@ -3,7 +3,8 @@ name: ugn-video
 x-s3-env: &s3-env
   S3_ENDPOINT: http://minio:9000
   # Browser-facing base URL for public/ objects (CloudFront domain in production).
-  PUBLIC_MEDIA_BASE_URL: http://localhost:9000/ugn-videos
+  # For testing from a phone on your LAN, set this to http://<your-LAN-IP>:9000/ugn-videos.
+  PUBLIC_MEDIA_BASE_URL: ${PUBLIC_MEDIA_BASE_URL:-http://localhost:9000/ugn-videos}
   S3_REGION: us-east-1
   S3_BUCKET: ugn-videos
   S3_ACCESS_KEY_ID: minioadmin

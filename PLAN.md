@@ -35,8 +35,24 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
 - [x] 4. **Admin upload UI.** Login screen. Uploader with chunking, concurrency, pause/resume/cancel, speed and ETA, and resume after refresh. Video list with live status through SSE, plus retry and delete. Apply the UGN theme. *(about 2.5h)*
 - [x] 5. **Worker.** Probe, poster, HLS ladder, upload, progress, retries, idempotency and reconciler. Tests for the state machine. *(about 2.5h)*
 - [x] 6. **Public playback.** List of READY videos. Player page with detection logic, quality menu, accessible controls, resume watching and the graceful states. `GET /videos/:id/playback`. *(about 2h)*
-- [ ] 7. **Verification.** Generate 10h and ~10GB test files. Test kill/resume for uploads, kill the worker mid-job, and test on devices. Fill in the test matrix. *(about 1.5h)*
-- [ ] 8. **Docs.** README (including AI usage and assumptions), ARCHITECTURE (with a mermaid diagram) and ANSWERS W1–W7. Demo video if time allows. *(about 2h)*
+- [ ] 7. **Verification.** *(Do last, after the docs. The author will supply the 10 h and ~10 GB test files; don't generate them. Desktop Safari automation via `safaridriver` waits for the author's one-time setup.)* Generate 10h and ~10GB test files. Test kill/resume for uploads, kill the worker mid-job, and test on devices. Fill in the test matrix. *(about 1.5h)*
+  - Status (Oct 14): **in progress.**
+    - ✅ Kill and resume an upload (M4).
+    - ✅ Kill the worker mid-job (M5, plus two clean stops on the 10 h job).
+    - ✅ Test matrix drafted in `TESTING.md`.
+    - 🟡 10 h file supplied; encode stopped at 30%, never READY.
+    - ❌ ~10 GB upload.
+    - ❌ Devices beyond desktop Chrome and partial macOS Safari.
+  - Remaining, in priority order:
+    1. iPhone Safari and an Instagram link (LAN IP via `S3_PUBLIC_ENDPOINT` **and** `PUBLIC_MEDIA_BASE_URL` in a root `.env`; see README "On a phone").
+    2. Android Chrome.
+    3. Firefox and Edge.
+    4. VLC with the master URL.
+    5. Finish the 10 h encode (~80 min, unattended), then the 07:42:10 seek and resume.
+    6. Session expiry mid-upload (401).
+    7. 10 GB upload. Can stay a documented gap.
+- [x] 8. **Docs.** README (including AI usage and assumptions), ARCHITECTURE (with a mermaid diagram) and ANSWERS W1–W7. ~~Demo video if time allows.~~ Skipped (author's call, Oct 14). *(about 2h)*
+  - After M7: refresh TESTING.md, the "Not verified" lines in README / ANSWERS W4 and W7, and the Verified column in ARCHITECTURE's failure-mode table.
 
 ## Decisions log (copy into README / ARCHITECTURE)
 - **MinIO image:** the official `minio/minio` and `minio/mc` repos are gone from Docker Hub, and quay.io needs a login. We use Bitnami's frozen archive builds `bitnamilegacy/minio:2025.7.23-debian-12-r5` and `bitnamilegacy/minio-client:2025.7.21-debian-12-r3`, pinned so reviewers run exactly what was tested. Production uses real S3, so this only affects local dev.
@@ -260,6 +276,53 @@ The repo is empty apart from the spec PDF and CLAUDE.md. Today is Tue Oct 13 and
   - Volume and mute aren't remembered between videos.
   - No Open Graph tags (needs server-rendered HTML), so links shared to Instagram/Facebook show no preview card.
   - CSS `aspect-ratio` needs iOS 15+; older iPhones get a collapsed box.
+
+### Milestone 7: verification (in progress)
+- **Extrapolating to 10 GB / 10 h from what was measured** (1 GiB upload in M4, 14-min iPhone `.mov` in M5, playback in M6). Only two things grow with size: **part/segment count** and **wall time**. Everything else is per part or per segment. Measured numbers are marked *measured*; the rest is arithmetic to confirm with the real files.
+- **Upload (measured: 1 GiB, 64 parts, resumed after reload).**
+  - 10 GB = 597 parts: 6 sign batches instead of 1, and still one ListParts page (S3 pages at 1,000; paging is implemented but no real upload under ~16 GB reaches it).
+  - Work lost on a drop is at most 4 in-flight parts = 64 MiB, whatever the file size.
+  - Bytes go browser → storage, so the API only sees small JSON calls whatever the size. Memory wasn't measured in M4; record `docker stats backend` and the browser heap during the M7 runs.
+  - Wall time for 10 GB: 67 min at 20 Mbit/s, 2.2 h at 10, 4.4 h at 5. Two timeouts only show up in long uploads:
+    - Part URLs (1 h TTL) re-sign 5 min before expiry, so any upload over ~55 min re-signs. Unit-tested, never hit in a browser (1 GiB on localhost takes minutes). Test with `UPLOAD_URL_TTL_SECONDS=60` and Chrome throttling.
+    - **Open finding:** the 8 h session expires mid-upload below ~2.8 Mbit/s (10 GB × 8 / 8 h). What the engine does on a 401 from sign/status is unchecked. Test with a short `JWT_TTL_SECONDS`.
+- **Processing (measured: 1080x1920, 14.1 min, 1.6 GB → 9.5 min encode, ~1.5x realtime, 650 MiB RSS, 920 MiB output = 9.1 Mbit/s summed, 428 objects).**
+  - 10 h at a 1080p ladder: ~6.8 h encode, ~41 GB output, 18,005 objects (6,000 segments × 3 + 4 playlists + poster).
+  - 10 h at a 720p ladder: estimated at 3–3.5 h from pixel count alone. **Measured on a real 10 h 720p video: ~75 min projected** (see the runs below). Content matters more than the pixel estimate suggested.
+  - Expected worker memory to stay flat. **Measured: it isn't.** ffmpeg RSS grows ~4 MiB per progress point (~730 MiB projected at the end of the encode); Node stays flat. Likely the HLS muxer's in-memory segment lists; not confirmed.
+  - Lock and heartbeat: the 9.5 min run had no lock errors and a max progress gap of 12 s. A 7 h run is ~400 lock renewals of the same kind; not proven over hours.
+  - A crash restarts the encode from 0 (known limitation, W2).
+- **Disk (finding from the extrapolation).**
+  - The worker's pre-flight check needs source + caps × duration × 1.1 + 1 GiB. For a 10 h / 10 GB 1080p source that's ~60 GB of free scratch; for the 11 GB 720p synthetic file, ~40 GB.
+  - Peak disk for a 10 h 1080p video is ~100 GB: source in MinIO + scratch copy + output on scratch + output in MinIO.
+  - **On Docker Desktop the check can't see the real limit.** Inside a container `statfs` reports the VM's sparse 1 TB disk (905 GB "free") while the Mac had 62 GB free. On a Linux host or EC2 it sees the real volume. Before the 10 h runs, free space (`docker system df`: ~36 GB reclaimable, 21 GB of it build cache). README: state the disk needed.
+  - Production fix (W2/W7): upload segments as they're produced and delete them locally, so scratch only needs the source.
+- **Playback (measured on the 14-min video).**
+  - Seeking fetches only the segment at the target (4:00 → `seg_00040`/`seg_00041`), so seek cost doesn't depend on duration. Prediction for 07:42:10 (27,730 s / 6 s): `seg_04621`.
+  - Variant playlists grow to 6,000 entries, ~180 KB each, fetched once at start: about 0.5 s on a 3 Mbit/s phone connection. Playlists compress well if the CDN gzips them.
+  - hls.js buffers are capped (30 s back, ≤60 s ahead), so player memory doesn't grow with duration.
+  - The control bar already fits a 10 h timestamp (M6). On a ~600 px seek bar a pixel is ~60 s; keyboard steps and "Jump to time" give precise seeks.
+- **First real 10 h run** (`10-hours-Earth-from-Space…_720p.mp4`: 10:03:46, 1280x720 H.264 25 fps, 1.97 GB):
+  - Upload: 1.8 GiB on localhost in under 15 s.
+  - Encode (720p ladder): 5 → 20% in 13.7 min, steady at ~4.6 min per 5 points, so about 78 min projected for the whole encode (~7.7x realtime). That's far faster than the 3–3.5 h estimate: the content is slow-moving, the source is 25 fps and the ladder is 720p.
+  - Worker memory 800 → 834 → 857 MiB at 10/15/20%. It may be page cache from the segment writes; check against ffmpeg's own RSS on the next run.
+  - Stopped by the author at 20% with `docker compose stop worker`: stopped in <1 s, row UPLOADED with 0 attempts used, `run0` back in `wait`, no partial output under `public/`, source kept. A restart re-encodes from 0 (no mid-encode resume; W2).
+- **Second run, same upload** (`docker compose start worker`): re-picked at once, 0 attempts used. 5 → 30% in 22 min (~0.88 min per point), so about 75 min projected for the whole encode. ffmpeg RSS 381 → 402 → 414 → 448 → 463 → 474 MiB at 5–30% (~4 MiB per point, ~730 MiB projected at the end of the encode); Node flat at ~135 MiB; container 676 → 798 MiB. No lock, stall or error lines in the worker log. Stopped again at 30% by the author; row back to UPLOADED, 0 attempts used. **Not run to READY yet**, so the 10 h playback checks (07:42:10 seek, resume) are still open.
+- **Still open:**
+  - One 10 GB upload (rubric: "10 GB upload works").
+  - The 10 h video reaching READY, then the 07:42:10 seek and resume on it.
+  - Output size and object-upload time for 10 h.
+  - Memory past 30% of a 10 h encode.
+  - Session and part-URL expiry in a real browser.
+  - Every platform other than desktop Chrome and partial macOS Safari.
+
+### Milestone 8: docs
+- **Files:** `README.md` (run, URLs, tests, phone testing, assumptions, gaps, AI usage), `ARCHITECTURE.md` (system flowchart, upload→process→playback sequence, ER diagram, lifecycle state diagram, API table, decisions, failure-mode table, rejected alternatives, real-AWS setup), `ANSWERS.md` (W1–W7), root `.env.example`.
+- **Compose:** `PUBLIC_MEDIA_BASE_URL` is now overridable (`${PUBLIC_MEDIA_BASE_URL:-http://localhost:9000/ugn-videos}`). Phone testing needs it as well as `S3_PUBLIC_ENDPOINT`: the playback API builds media URLs from it, and `localhost` on a phone is the phone. It's read per request, so existing videos pick up the new address without re-processing. Both a root `.env` and `infra/.env` are read by `docker compose` (checked with `docker compose config`). The default is unchanged.
+- **W3 prices:** CloudFront tiers and MediaConvert's normalized-minute rates were checked against third-party price trackers (AWS's own pricing pages couldn't be opened), and the answer says so. MediaConvert bills per normalized minute: HD (720p/1080p) AVC ≤30 fps counts 2x, SD 1x. Result: ~$26k/month, ~97% of it egress at a 3 Mbit/s average; self-hosted processing ~$245 vs MediaConvert ~$5.1–8.2k.
+- **Correction found while writing:** the 45 s stall timer (`xhrPutPart.ts`) has no unit test; the docs and TESTING.md no longer claim one. The session-expiry message is unit-tested (`UploadEngine.test.ts`), but re-login + resume isn't browser-tested.
+- **AI-usage section** is a draft in the author's voice; the author should check it matches how they actually worked.
+- **Mermaid diagrams:** all 4 parse with mermaid 11.4 (`mermaid.parse` in headless Chrome). Still worth a look on GitHub for layout.
 
 ## Critical files (to be created)
 - `package.json` (workspaces)
